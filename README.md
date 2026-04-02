@@ -1,51 +1,128 @@
-# Containerised Production Tool for BBC
+# CONTAINERIZED MEDIA PROCESSING PIPELINE FOR BBC
 
-## 1. Introduction
-This project aims to provide a containerised production tool for BBC creative team. It includes understanding algorithms from audio and visual modalities respectively and main control pannel.
+---
 
-```
+## 1. PROJECT OVERVIEW
+
+A distributed media processing tool designed for BBC creative teams. It integrates audio and visual modality understanding algorithms into a scalable containerized architecture using **FastAPI**, **Celery**, and **Redis**.
+
+---
+
+## 2. DIRECTORY STRUCTURE
+
+```bash
 .
-├── audio.txt
-├── Dockerfile
-├── main.py
-├── models
-├── README.md
-├── src
-│   ├── app
-│   ├── audio
-│   └── visual
-└── visual.txt
+|-- controller
+|   |-- main.py         # FastAPI application & API endpoints
+|   |-- downloader.py   # Support for S3, URL, and Local file ingestion
+|   |-- tasks.py        # Celery task signatures for Producer side
+|   |-- Dockerfile      # Python 3.10-slim base
+|-- worker
+|   |-- tasks.py        # Analysis logic & automated cleanup for Consumer side
+|   |-- Dockerfile      # Celery worker configuration
+|-- docker-compose.yml  # Service orchestration for Redis, Controller, Worker
+|-- temp_data           # Shared volume for temporary media processing
 ```
-|FILE or FOLDER|EXPLAINATION|
-|---|---|
-|audio.txt|requirements file for audio understanding algorithm|
-|Dockerfile|docker image configuration|
-|main.py|main control pannel|
-|models|saving ckpt file for audio & visual understanding algorithms, which is mounted to container rather than copied|
-|app|project placeholder for main app|
-|audio|project placeholder for audio understanding|
-|video|project placeholder for visual understanding|
-|visual.txt|requirements file for visual understanding algorithm|
 
+---
 
-## 2. Docker Image 
+## 3. KEY FEATURES
 
-Docker 
+- **Universal Ingestion**  
+  Support for S3, HTTP/HTTPS, and local file paths  
 
-### 2.1 Dockerfile
-Docker image is used to compose the environment and code for running service.
+- **Parallel Processing**  
+  Uses Celery Chords to run heavy audio and visual analysis simultaneously  
 
-|Layer|Requirements|
-|---|---|
-|Base Image|CUDA12.1, Linux|
-|System Dependencies| Miniconda, FFmpeg|
-|Python Env|Audio Understanding, Visual Understanding, APP|
-|SOURCE|Audio Project (code-only), Visual Project (code-only), app.py|
+- **Automated Cleanup**  
+  The worker automatically deletes `/app/tmp/<job_id>` once processing is finalized to prevent disk overflow  
 
+- **Industrial Stability**  
+  Optimized with:
+  - Visibility timeout (1 hour)  
+  - Strict concurrency limits  
+  - Late acknowledgments  
+  - Designed for long-running (30min+) AI workloads on GPUs (e.g., A100)
 
-### 2.2 Workflow
-We assume the clients will click the button on UI to trigger the processing start. The control pannel will receive the request and analyze the arguments to excute the specific understanding algorithms or both.
+---
+
+## 4. GETTING STARTED
+
+### Prerequisites
+
+- Docker  
+- Docker Compose  
+- (Optional) AWS credentials for S3 access  
+
+### Deployment
+
+```bash
+docker-compose up --build
+```
+
+API will be available at:
 
 ```
-[UI] --triger--> [Control Pannel] --excute 
+http://localhost:9000
 ```
+
+---
+
+### API Usage
+
+#### Start Processing
+
+- **Endpoint:** `POST /process?path={media_path}`
+
+```bash
+curl -X POST "http://localhost:9000/process?path=/app/data/video.mp4"
+```
+
+Returns a `job_id` used for tracking the asynchronous workflow.
+
+---
+
+#### Check Status & Get Results
+
+- **Endpoint:** `GET /status/{job_id}`
+
+```bash
+curl http://localhost:9000/status/<your_job_id>
+```
+
+Returns combined JSON results once `is_ready` is `true`.
+
+---
+
+## 5. TASK ORCHESTRATION DETAILS
+
+The pipeline utilizes **Celery Chords**:
+
+1. **Header Tasks**  
+   - `process_audio`  
+   - `process_visual`  
+   → Dispatched in parallel via Redis queue  
+
+2. **Callback Task**  
+   - `finalize_results`  
+   → Executes only after all header tasks complete  
+
+3. **Cleanup Phase**  
+   - Performs recursive deletion of the temporary workspace  
+
+---
+
+## 6. HEAVY AI WORKLOAD CONFIGURATION
+
+The worker is specifically configured to protect GPU VRAM and ensure task completion:
+
+- `--pool=solo`  
+  Ensures only one heavy AI model runs at a time (prevents OOM errors)
+
+- `visibility_timeout=3600`  
+  Allows tasks up to 1 hour without Redis prematurely re-dispatching them  
+
+- `worker_prefetch_multiplier=1`  
+  Prevents a single worker from hoarding tasks in its local queue  
+
+---
