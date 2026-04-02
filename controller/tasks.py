@@ -7,9 +7,9 @@ app = Celery(
 )
 
 @app.task
-def process_visual(path):
+def process_visual(file_path):
     pass
 
 @app.task
-def process_audio(path):
+def process_audio(file_path):
     pass
