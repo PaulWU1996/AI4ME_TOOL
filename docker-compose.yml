@@ -1,0 +1,28 @@
+services:
+  redis:
+    image: redis/redis-stack-server:latest # 使用带管理界面的版本
+    container_name: pipeline_redis
+
+  controller:
+    build: ./controller
+    container_name: pipeline_controller
+    ports:
+      - "9000:9000"
+    volumes:
+      - ./temp_data:/app/tmp
+      - ./data:/app/data
+    environment:
+      - SHARED_PATH=/app/tmp
+    depends_on:
+      - redis
+
+  worker:
+    build: ./worker
+    container_name: pipeline_worker
+    volumes:
+      - ./temp_data:/app/tmp
+      - ./data:/app/data
+    # --pool=solo 解决了 Mac/Windows 上的多进程兼容性问题
+    command: celery -A tasks worker --loglevel=info --pool=solo
+    depends_on:
+      - redis
