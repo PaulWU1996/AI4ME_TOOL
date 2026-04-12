@@ -2,6 +2,7 @@ from celery import Celery
 import os
 import time
 import shutil
+import requests
 
 app = Celery('tasks', 
              broker='redis://redis:6379/0', 
@@ -72,6 +73,11 @@ def process_audio(file_path):
         # 模拟调用 Service 4 的 FastAPI
         # response = requests.post("http://service4_audio:9002/predict", json={"path": file_path})
         # return response.json()
+        # response = requests.post(
+        #     "http://service4_audio:9002/predict", 
+        #     json={"path": file_path},
+        #     timeout=1800  # 设置请求超时时间，防止长时间挂起
+        # )
 
         time.sleep(10)
         result_template.update(
