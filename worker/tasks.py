@@ -4,9 +4,19 @@ import time
 import shutil
 import requests
 
+redis_host = os.getenv('REDIS_HOST', '127.0.0.1') # 默认用本地，允许通过环境变量修改
+redis_port = os.getenv('REDIS_PORT', '6379')
+audio_host = os.getenv('AUDIO_HOST',"localhost")
+audio_port = os.getenv('AUDIO_PORT', '9001')
+visual_host = os.getenv('VISUAL_HOST',"localhost")
+visual_port = os.getenv('VISUAL_PORT', '9051')
+
+audio_api_url = f"http://{audio_host}:{audio_port}/predict"
+visual_api_url = f"http://{visual_host}:{visual_port}/predict"
+
 app = Celery('tasks', 
-             broker='redis://redis:6379/0', 
-             backend='redis://redis:6379/0')
+             broker=f'redis://{redis_host}:{redis_port}/0', 
+             backend=f'redis://{redis_host}:{redis_port}/0')
 
 app.conf.update(
     broker_transport_options={'visibility_timeout': 3600},  # 1小时的任务可见性超时
@@ -70,14 +80,9 @@ def process_audio(file_path):
         if not os.path.exists(file_path):
             return "ERROR: File Not Found"
 
-        # 模拟调用 Service 4 的 FastAPI
-        # response = requests.post("http://service4_audio:9002/predict", json={"path": file_path})
-        # return response.json()
-        # response = requests.post(
-        #     "http://service4_audio:9002/predict", 
-        #     json={"path": file_path},
-        #     timeout=1800  # 设置请求超时时间，防止长时间挂起
-        # )
+        response = requests.post(
+
+        )
 
         time.sleep(10)
         result_template.update(

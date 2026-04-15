@@ -13,6 +13,9 @@ services:
       - ./data:/app/data
     environment:
       - SHARED_PATH=/app/tmp
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+    platform: linux/amd64 # 解决 M1/M2 Mac 上的兼容性问题
     depends_on:
       - redis
 
@@ -22,7 +25,11 @@ services:
     volumes:
       - ./temp_data:/app/tmp
       - ./data:/app/data
+    environment:
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
     # --pool=solo 解决了 Mac/Windows 上的多进程兼容性问题
     command: celery -A tasks worker --loglevel=info --pool=solo
+    platform: linux/amd64
     depends_on:
       - redis

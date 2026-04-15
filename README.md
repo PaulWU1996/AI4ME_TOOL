@@ -126,3 +126,42 @@ The worker is specifically configured to protect GPU VRAM and ensure task comple
   Prevents a single worker from hoarding tasks in its local queue  
 
 ---
+
+
+reddis start command:
+```
+apptainer run --env LC_ALL=C redis.sif \
+  redis-server \
+  --port 6379 \
+  --protected-mode no \
+  --save "" \
+  --appendonly no \
+  --dir /tmp \
+  --logfile ""
+```
+
+
+controller start command:
+```
+apptainer exec \
+  --env SHARED_PATH="/mnt/fast/nobackup/scratch4weeks/pw0036/Compose/temp_data" \
+  --env REDIS_HOST="127.0.0.1" \
+  --pwd /app \
+  controller.sif \
+  uvicorn main:app --host 0.0.0.0 --port 9000
+```
+
+worker start command:
+```
+apptainer exec \
+  --env SHARED_PATH="/mnt/fast/nobackup/scratch4weeks/pw0036/Compose/temp_data" \
+  --env REDIS_HOST="127.0.0.1" \
+  --pwd /app \
+  worker.sif \
+  celery -A tasks worker --loglevel=info --pool=solo
+```
+
+curl test command:
+```
+curl -X POST "http://127.0.0.1:9000/process?path=https://www.w3schools.com/html/mov_bbb.mp4"
+```

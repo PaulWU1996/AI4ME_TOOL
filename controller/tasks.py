@@ -1,10 +1,13 @@
 from celery import Celery
 
-app = Celery(
-    'tasks',
-    broker='redis://redis:6379/0',
-    backend='redis://redis:6379/0'
-)
+import os
+
+redis_host = os.getenv('REDIS_HOST', '127.0.0.1') # 默认用本地，允许通过环境变量修改
+redis_port = os.getenv('REDIS_PORT', '6379')
+
+app = Celery('tasks', 
+             broker=f'redis://{redis_host}:{redis_port}/0', 
+             backend=f'redis://{redis_host}:{redis_port}/0')
 
 app.conf.update(
     broker_transport_options={'visibility_timeout': 3600},  # 1小时的任务可见性超时
