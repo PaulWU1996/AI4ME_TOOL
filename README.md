@@ -140,6 +140,10 @@ apptainer run --env LC_ALL=C redis.sif \
   --logfile ""
 ```
 
+redis check command:
+```
+apptainer exec redis.sif redis-cli -p 6379 ping
+```
 
 controller start command:
 ```
@@ -164,4 +168,8 @@ apptainer exec \
 curl test command:
 ```
 curl -X POST "http://127.0.0.1:9000/process?path=https://www.w3schools.com/html/mov_bbb.mp4"
+```
+
+```
+apptainer run --nv --env MODEL_PATH="/mnt/fast/nobackup/scratch4weeks/pw0036/Compose/weights/PALUniEncRdFc3Llama31_8B_s2/checkpoint-final" --env SHARED_PATH="/mnt/fast/nobackup/scratch4weeks/pw0036/samples"  --pwd app audioservice@1.sif python3 -m uvicorn src.audio_entry:app --host 0.0.0.0 --port 8000
 ```

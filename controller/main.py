@@ -41,18 +41,24 @@ async def start_pipeline(path: str):
 
 @app.get("/status/{job_id}")
 async def get_status(job_id: str):
-    # 现在直接查询汇总任务的状态
     result = AsyncResult(job_id, app=celery_app)
 
-    if not result:
-        raise HTTPException(status_code=505, detail="Task not found")
+    # 检查任务是否存在（针对无效 ID）
+    if result.status == 'PENDING' and not result.info:
+         raise HTTPException(status_code=404, detail="Task not found or expired")
     
-    is_ready = result.ready()
-    
-    return {
+    response = {
         "job_id": job_id,
-        "is_ready": is_ready,
-        "status": result.status,
-        # 只有 Ready 为 True 时，result.result 才是由 finalize_results 汇总好的字典
-        "results": result.result if is_ready else None
+        "status": result.status, # PENDING, STARTED, SUCCESS, FAILURE
+        "is_ready": result.ready(),
+        "results": None
     }
+
+    if result.ready():
+        if result.successful():
+            response["results"] = result.result
+        else:
+            # 如果任务失败（比如代码崩溃），返回错误信息
+            response["results"] = {"error": str(result.result)}
+            
+    return response
