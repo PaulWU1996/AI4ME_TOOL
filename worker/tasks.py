@@ -135,7 +135,7 @@ def process_audio(file_path):
 
 
 @app.task(name="tasks.finalize_results")
-def finalize_results(raw_results, job_id):
+def finalize_results(raw_results, job_id, callback_url=None):
     
     audio_data = {}
     visual_data = {}
@@ -173,10 +173,18 @@ def finalize_results(raw_results, job_id):
     else:
         print(f"[Finalize] Not all tasks succeeded. Preserving source video for debugging: {video_name}")
 
-    return {
+    final_output = {
         "job_id": job_id,
+        "status": "success" if all_success else "partial_failure",
         "video_name": video_name,
         "audio_result": audio_data.get("output"),
         "visual_result": visual_data.get("output"),
     }
-    
+
+    if callback_url:
+        try: 
+            requests.post(callback_url, json=final_output, timeout=10)
+        except Exception as e:
+            print(f"[Callback Warning] Failed to send results to callback URL: {e}")
+
+    return final_output

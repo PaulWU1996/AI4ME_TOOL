@@ -13,7 +13,7 @@ app = FastAPI()
 downloader = UniversalDownloader(base_dir=SHARED_PATH)
 
 @app.post("/process")
-async def start_pipeline(path: str):
+async def start_pipeline(path: str, callback_url: str = None):
 
     job_id = uuid() 
     workspace = os.path.join(SHARED_PATH, job_id)
@@ -27,7 +27,7 @@ async def start_pipeline(path: str):
             process_visual.s(local_standard_path)
         ]
 
-        callback = finalize_results.s(job_id)
+        callback = finalize_results.s(job_id, callback_url=callback_url)
         chord(header)(callback.set(task_id=job_id))
         return {
             "status": "submitted",
@@ -43,7 +43,6 @@ async def start_pipeline(path: str):
 async def get_status(job_id: str):
     result = AsyncResult(job_id, app=celery_app)
 
-    # 检查任务是否存在（针对无效 ID）
     if result.status == 'PENDING' and not result.info:
          raise HTTPException(status_code=404, detail="Task not found or expired")
     
@@ -51,14 +50,15 @@ async def get_status(job_id: str):
         "job_id": job_id,
         "status": result.status, # PENDING, STARTED, SUCCESS, FAILURE
         "is_ready": result.ready(),
-        "results": None
+        "data": None
     }
 
     if result.ready():
         if result.successful():
-            response["results"] = result.result
+            response["data"] = result.result
+            response["message"] = "Task completed successfully"
         else:
-            # 如果任务失败（比如代码崩溃），返回错误信息
-            response["results"] = {"error": str(result.result)}
+            response["status"] = "FAILURE"
+            response["message"] = str(result.result) 
             
     return response

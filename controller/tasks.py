@@ -26,5 +26,5 @@ def process_audio(file_path):
     pass
 
 @app.task(name="tasks.finalize_results")
-def finalize_results(raw_results, job_id):
+def finalize_results(raw_results, job_id, callback_url=None):
     pass
