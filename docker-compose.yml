@@ -1,14 +1,16 @@
 services:
   redis:
     image: redis/redis-stack-server:latest
-    container_name: pipeline_redis
+    container_name: redis
     ports:
-      - "6379:6379"
-      - "8001:8001" # Redis Insight 管理界面
+      - "6379:6379" # 任务通信端口
+      - "8001:8001" # Redis Insight 可视化界面
+    networks:
+      - ai_network
 
   controller:
     build: ./controller
-    container_name: pipeline_controller
+    container_name: controller
     ports:
       - "9000:9000"
     volumes:
@@ -18,39 +20,60 @@ services:
       - SHARED_PATH=/app/tmp
       - REDIS_HOST=redis
       - REDIS_PORT=6379
-    platform: linux/amd64
     depends_on:
       - redis
+    networks:
+      - ai_network
 
   worker:
     build: ./worker
-    container_name: pipeline_worker
+    container_name: worker
     volumes:
       - ./temp_data:/app/tmp
       - ./data:/app/data
     environment:
       - REDIS_HOST=redis
       - REDIS_PORT=6379
-      # --- 关键：在这里注入 Service 的连接信息 ---
-      - AUDIO_HOST=service4_audio
-      - AUDIO_PORT=9002
-      - VISUAL_HOST=service3_visual
-      - VISUAL_PORT=9001
-    # 生产建议：如果不是在 Mac/Windows 调试，可以去掉 --pool=solo 改用 -c 2
-    command: celery -A tasks worker --loglevel=info --pool=solo
-    platform: linux/amd64
+      - AUDIO_HOST=audioservice # 对应下方的服务名
+      - AUDIO_PORT=8000 # 容器内原始端口
+      - VISUAL_HOST=visualservice # 对应下方的服务名
+      - VISUAL_PORT=8000 # 容器内原始端口
+    # 在 A100 上，我们开启并发 2，让音频和视觉任务同时进行
+    command: celery -A tasks worker --loglevel=info --concurrency=2
     depends_on:
       - redis
-      - service4_audio # 确保音频服务启动后再启动 worker
+      - audioservice
+      - service3_visual
+    networks:
+      - ai_network
 
-  # 假设这是你的音频处理服务
-  service4_audio:
-    image: your_audio_engine_image
-    container_name: service4_audio
+  audioservice:
+    image: audioservice:latest # 你 load 进来的本地镜像名
+    container_name: audioservice
     ports:
-      - "9002:9002"
+      - "9002:8000" # 宿主机用 9002 访问，内部是 8000
     volumes:
-      - ./temp_data:/app/tmp # 必须挂载同一个目录
+      - ./temp_data:/app/tmp
+    environment:
+      - SHARED_PATH=/app/tmp
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1 # 占用 A100 GPU
+              capabilities: [ gpu ]
+    networks:
+      - ai_network
+
+  # 5. 视觉推理服务 (Service 3)
+  service3_visual:
+    image: visualservice:latest # 假设你的视觉服务镜像名
+    container_name: visualservice
+    ports:
+      - "9001:8000" # 宿主机用 9001 访问，内部是 8000
+    volumes:
+      - ./temp_data:/app/tmp
     environment:
       - SHARED_PATH=/app/tmp
     deploy:
@@ -59,4 +82,10 @@ services:
           devices:
             - driver: nvidia
               count: 1
-              capabilities: [ gpu ] # 如果需要 GPU 加速
+              capabilities: [ gpu ]
+    networks:
+      - ai_network
+
+networks:
+  ai_network:
+    driver: bridge

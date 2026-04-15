@@ -22,6 +22,13 @@ A distributed media processing tool designed for BBC creative teams. It integrat
 |   |-- Dockerfile      # Celery worker configuration
 |-- docker-compose.yml  # Service orchestration for Redis, Controller, Worker
 |-- temp_data           # Shared volume for temporary media processing
+|-- weights             # Placeholder for AI model weights
+|   |-- AFWhisper       
+|   |   |-- sound_tower
+|   |-- PALUniEncRdFc3Llama31_8B_s2
+|   |   |-- checkpoint-final
+|   |-- models
+|-- README.md            # Project documentation (this file) 
 ```
 
 ---
@@ -56,11 +63,25 @@ A distributed media processing tool designed for BBC creative teams. It integrat
 
 ### Deployment
 
+1. Copy the weights folder to the appropriate location following the structure outlined above.
+
+2. Load the Docker images for the audio and visual services, respectively:
+
+```bash
+docker load -i audioservice.tar
+docker load -i narrative-api.tar
+```
+- The narrative-api.tar is the image for the visual service and produced by Asmar. (No test on his image yet, but it should work as long as the entrypoint is correct and the model weights are in place).
+
+- The audioservice.tar is the image for the audio service and produced by Tony (audio llm) and Paul (plugin wrapper and docker design). It has been tested and works with the current codebase.
+
+3. Start the entire stack using Docker Compose:
 ```bash
 docker-compose up --build
 ```
+There will be several services starting up, including Redis, the Controller API, the Worker API, the audio service and the visual service. The Controller and Worker will connect to Redis for task orchestration.
 
-API will be available at:
+Once compose completed, the TOOL API will be available at:
 
 ```
 http://localhost:9000
@@ -72,13 +93,13 @@ http://localhost:9000
 
 #### Start Processing
 
-- **Endpoint:** `POST /process?path={media_path}`
+- **Endpoint:** `POST /process?path={media_path}&callback_url={optional_callback}`
 
 ```bash
 curl -X POST "http://localhost:9000/process?path=/app/data/video.mp4"
 ```
 
-Returns a `job_id` used for tracking the asynchronous workflow.
+Returns a `job_id` used for tracking the asynchronous workflow. If `callback_url` is provided, results will be sent there once processing is complete. Otherwise, results can be retrieved via the status endpoint.
 
 ---
 
@@ -127,7 +148,19 @@ The worker is specifically configured to protect GPU VRAM and ensure task comple
 
 ---
 
+## 7. INDIVIDUAL SERVICE COMPONENT TESTING
 
+For the purpose of testing individual service components (audio and visual service) without Docker Compose, you can use the following commands. 
+
+### 7.1 
+
+
+
+
+
+---
+
+### Appendix: Commands for 
 reddis start command:
 ```
 apptainer run --env LC_ALL=C redis.sif \
