@@ -2,6 +2,7 @@ import os
 import time
 import shutil
 import requests
+import xmltodict
 import json
 from celery import Celery
 
@@ -13,13 +14,15 @@ redis_port = os.getenv('REDIS_PORT', '6379')
 audio_host = os.getenv('AUDIO_HOST', "localhost")
 audio_port = os.getenv('AUDIO_PORT', '9001')
 visual_host = os.getenv('VISUAL_HOST', "localhost")
-visual_port = os.getenv('VISUAL_PORT', '9051')
+visual_port = os.getenv('VISUAL_PORT', '9002')
+visual_api_admin_key = os.getenv('ADMIN_KEY', 'ai4me_admin_password')
 
 # 拼接 API 完整路径 (注意：根据你之前的 FastAPI 代码，路径是 /process_audio/)
 audio_api_url = f"http://{audio_host}:{audio_port}/process_audio/"
-visual_api_url = f"http://{visual_host}:{visual_port}/predict"
+visual_api_url = f"http://{visual_host}:{visual_port}" # 这里假设视觉服务的 FastAPI 监听根路径，实际使用时请根据你的代码调整
 
 shared_path = os.getenv("SHARED_PATH", "/app/tmp")
+api_key_path = os.getenv("API_KEY_PATH", "/app/data") # 视觉服务 API key 存储路径
 
 # --- 2. Celery 实例初始化 ---
 app = Celery('tasks', 
@@ -53,21 +56,110 @@ def save_to_disk(job_id, filename, data):
     with open(os.path.join(output_dir, filename), 'w', encoding='utf-8') as f:
         json.dump(data, f, indent=4, ensure_ascii=False)
 
+def ensure_api_key(api_dir="/app/data", admin_key=visual_api_admin_key): # change the api_dir
+    key_file_path = os.path.join(api_dir, "api.key")
+
+    if os.path.exists(key_file_path):
+        with open(key_file_path, 'r') as f:
+            existing_key = f.read().strip()
+            if existing_key:
+                print(f"[Key Manager] API key already exists: {existing_key}")
+                return existing_key
+    else:
+        print(f"[Key Manager] API key file not found. Creating new key at {key_file_path}")
+        gen_url = visual_api_url + "/generate"
+        headers = {
+            "X-Admin-Key": admin_key,
+            "Content-Type": "application/json"
+        }
+        payload = {
+            "client_name": "client_ai4me",
+            "expire_in_days": 365
+        }
+
+        try: 
+            response = requests.post(gen_url, headers=headers, json=payload, timeout=30)
+            response.raise_for_status()
+            
+            data = response.json()
+            new_key = data.get("api_key")
+
+            if not new_key:
+                raise ValueError(f"Failed to obtain API key from visual service: {data}")
+            with open(key_file_path, 'w') as f:
+                f.write(new_key)
+            print(f"[Key Manager] Generated and saved new API key: {new_key}")
+
+            os.chmod(key_file_path, 0o644)
+            return new_key
+    
+        except Exception as e:
+            print(f"[Key Manager] Error ensuring API key: {str(e)}")
+            return None
+        
+def extract_flat_captions(xml_body):
+    """
+       [{"start": 0.0, "end": 15.0, "captions": "..."}, ...]
+    """
+    data = xmltodict.parse(xml_body)
+    
+    try:
+        segments_node = data.get("VideoAnalysis", {}).get("Segments", {})
+        raw_segments = segments_node.get("Segment", [])
+    except (AttributeError, KeyError):
+        return []
+
+    if isinstance(raw_segments, dict):
+        raw_segments = [raw_segments]
+    
+    return [
+        {
+            "start": float(seg.get("StartTime", 0)),
+            "end": float(seg.get("EndTime", 0)),
+            "captions": seg.get("Description", "")
+        }
+        for seg in raw_segments
+    ]
+
 @app.task(name="tasks.process_visual")
 def process_visual(file_path):
+    # file_path: /app/tmp/{task_id}/{filename}
     result_template = {"type": "visual", "success": False, "video_name": None,"output": None, "error": None}
     file_path = os.path.normpath(file_path)
     path_parts = file_path.split(os.sep)
     job_id = path_parts[-2]
     file_name = path_parts[-1]
+
+    api_key = ensure_api_key()
+    if not api_key:
+        result_template["error"] = "Failed to obtain API key for visual service"
+        result_template["video_name"] = file_name
+        return result_template
     try:
         print(f"[Visual Worker] Starting Task: {file_path}")
-        
+
         if not os.path.exists(file_path):
             raise FileNotFoundError(f"File not found: {file_path}")
+
+        headers = {"X-API-Key": api_key}
+        analyze_url = visual_api_url + "/analyze"        
+        # real API calling
+        with open(file_path, 'rb') as f:
+            files = {'video': f}
+
+            response = requests.post(
+                analyze_url,
+                headers=headers,
+                files=files,
+                timeout=6000
+            )
         
-        time.sleep(25) # 模拟处理
-        result_template.update({"success": True, "video_name": file_name, "output": {"info": "Mock visual data"}})
+        response.raise_for_status()
+        xml_data = response.text
+
+        outputs = extract_flat_captions(xml_data)
+
+        result_template.update({"success": True, "video_name": file_name, "output": outputs})
 
         file_name_no_ext = os.path.splitext(file_name)[0]
         save_to_disk(job_id, f"{file_name_no_ext}_visual_output.json", result_template["output"])
@@ -85,6 +177,7 @@ def process_audio(file_path):
     path_parts = file_path.split(os.sep)
     job_id = path_parts[-2]
     file_name = path_parts[-1]
+
     try:
         print(f"[Audio Worker] Starting Task: {file_path}")
         
@@ -98,13 +191,12 @@ def process_audio(file_path):
 
         response = requests.post(audio_api_url, json=payload, timeout=1800)
         
-        # 尝试捕获 FastAPI 的详细错误
         if response.status_code != 200:
             try:
                 err_detail = response.json().get("detail", response.text)
             except:
                 err_detail = response.text
-            raise Exception(f"Service4 Error ({response.status_code}): {err_detail}")
+            raise Exception(f"Audio Service Error ({response.status_code}): {err_detail}")
 
         service_data = response.json()
 

@@ -21,13 +21,15 @@ A distributed media processing tool designed for BBC creative teams. It integrat
 |   |-- tasks.py        # Analysis logic & automated cleanup for Consumer side
 |   |-- Dockerfile      # Celery worker configuration
 |-- docker-compose.yml  # Service orchestration for Redis, Controller, Worker
-|-- temp_data           # Shared volume for temporary media processing
+|-- shared              # Shared volume for temporary media processing
+|   |-- api-data        # Folder storing Sample API request payloads for testing
 |-- weights             # Placeholder for AI model weights
 |   |-- AFWhisper       
 |   |   |-- sound_tower
 |   |-- PALUniEncRdFc3Llama31_8B_s2
 |   |   |-- checkpoint-final
 |   |-- models
+|-- init.sh              # Initialization script for setting up the environment for visual service 
 |-- README.md            # Project documentation (this file) 
 ```
 
@@ -101,6 +103,23 @@ curl -X POST "http://localhost:9000/process?path=/app/data/video.mp4"
 
 Returns a `job_id` used for tracking the asynchronous workflow. If `callback_url` is provided, results will be sent there once processing is complete. Otherwise, results can be retrieved via the status endpoint.
 
+
+The `path` parameter supports:
+- Local file paths (e.g., `/app/data/video.mp4`)
+- HTTP/HTTPS URLs (e.g., `https://example.com/video.mp4`)
+- S3 paths (e.g., `s3://bucket/key` - requires AWS credentials to be configured in the Controller environment) [Currently not tested with S3, but the downloader.py has the logic to support S3 download using boto3, so it should work as long as the AWS credentials are properly set up in the Controller container]
+
+Once the request is received, the Controller will:
+1. Create a unique `job_id` and corresponding temporary workspace at `/app/tmp/{job_id}`
+2. Download the media file into this workspace using `downloader.py`
+3. Dispatch Celery tasks for audio and visual processing in parallel
+4. Monitor task completion and aggregate results once all tasks are finished
+5. Clean up the temporary workspace to free disk space
+6. Return combined results to the client or send them to the provided `callback_url` if specified
+
+Note: The outputs (audio and visual analysis results, as well the task info) will be saved in the shared volume workspace under `/app/tmp/{job_id}/` before being returned to the client or sent to the callback URL. You can also check the outputs on the host machine by navigating to the corresponding directory in the shared volume (e.g., `/your/path/to/shared_vol/{job_id}/`) while the processing is still running or after it has completed. This can be useful for debugging or verifying intermediate results.
+
+
 ---
 
 #### Check Status & Get Results
@@ -152,10 +171,32 @@ The worker is specifically configured to protect GPU VRAM and ensure task comple
 
 For the purpose of testing individual service components (audio and visual service) without Docker Compose, you can use the following commands. 
 
-### 7.1 
+### 7.1  Audio Service Testing
 
+Start the audio service container with the appropriate environment variables and volume mounts:
+```bash
+docker run -d \
+  --name audioservice \
+  --gpus all \
+  -e MODEL_PATH="/app/weights/checkpoint-final" \
+  -e SHARED_PATH="/app/tmp" \
+  -v /your/path/to/PALUniEncRdFc3Llama31_8B_s2/checkpoint-final:/app/weights/checkpoint-final \
+  -v /your/path/to/shared_vol:/app/tmp \
+  -p 9002:8000 \
+  -w /app \
+  audioservice:latest \
+  python3 -m uvicorn src.audio_entry:app --host 0.0.0.0 --port 8000
+```
+Once service is ready, send a test request to the audio service:
+```bash
+curl -X POST "http://localhost:9002/process?path=https://www.w3schools.com/html/mov_bbb.mp4"
+```
+You can also check the service status by sending a GET request to the status endpoint:
+```bash
+curl -X POST "http://localhost:9002/health"
+```
 
-
+### 7.2  Visual Service Testing
 
 
 ---

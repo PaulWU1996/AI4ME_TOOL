@@ -3,8 +3,8 @@ services:
     image: redis/redis-stack-server:latest
     container_name: redis
     ports:
-      - "6379:6379" # 任务通信端口
-      - "8001:8001" # Redis Insight 可视化界面
+      - "6379:6379" # communication port
+      - "8001:8001" # Redis Insight GUI
     networks:
       - ai_network
 
@@ -14,7 +14,7 @@ services:
     ports:
       - "9000:9000"
     volumes:
-      - ./temp_data:/app/tmp
+      - ./shared:/app/tmp
       - ./data:/app/data
     environment:
       - SHARED_PATH=/app/tmp
@@ -29,53 +29,37 @@ services:
     build: ./worker
     container_name: worker
     volumes:
-      - ./temp_data:/app/tmp
+      - ./shared:/app/tmp
       - ./data:/app/data
     environment:
       - REDIS_HOST=redis
       - REDIS_PORT=6379
-      - AUDIO_HOST=audioservice # 对应下方的服务名
-      - AUDIO_PORT=8000 # 容器内原始端口
-      - VISUAL_HOST=visualservice # 对应下方的服务名
-      - VISUAL_PORT=8000 # 容器内原始端口
-    # 在 A100 上，我们开启并发 2，让音频和视觉任务同时进行
+      - AUDIO_HOST=audioservice
+      - AUDIO_PORT=8000
+      - VISUAL_HOST=visualservice
+      - VISUAL_PORT=8000
+      - SHARED_PATH=/app/tmp
+      - ADMIN_KEY=ai4me_admin_password # Replace with actual admin password
     command: celery -A tasks worker --loglevel=info --concurrency=2
     depends_on:
       - redis
       - audioservice
-      - service3_visual
+      - visualservice
     networks:
       - ai_network
 
   audioservice:
-    image: audioservice:latest # 你 load 进来的本地镜像名
+    image: audioservice:latest
     container_name: audioservice
     ports:
-      - "9002:8000" # 宿主机用 9002 访问，内部是 8000
+      - "9002:8000"
     volumes:
-      - ./temp_data:/app/tmp
+      - ./shared:/app/tmp
+      - ./weights:/app/weights
     environment:
       - SHARED_PATH=/app/tmp
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: 1 # 占用 A100 GPU
-              capabilities: [ gpu ]
-    networks:
-      - ai_network
-
-  # 5. 视觉推理服务 (Service 3)
-  service3_visual:
-    image: visualservice:latest # 假设你的视觉服务镜像名
-    container_name: visualservice
-    ports:
-      - "9001:8000" # 宿主机用 9001 访问，内部是 8000
-    volumes:
-      - ./temp_data:/app/tmp
-    environment:
-      - SHARED_PATH=/app/tmp
+      - MODEL_PATH=/app/weights/PPALUniEncRdFc3Llama31_8B_s2/checkpoint-final
+    command: python3 -m uvicorn src.audio_entry:app --host 0.0.0.0 --port 8000
     deploy:
       resources:
         reservations:
@@ -83,6 +67,27 @@ services:
             - driver: nvidia
               count: 1
               capabilities: [ gpu ]
+    networks:
+      - ai_network
+
+  visualservice:
+    image: narrative-api:latest
+    container_name: visualservice
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [ gpu ]
+    environment:
+      - ADMIN_KEY=ai4me_admin_password # Replace with actual admin password
+      - API_KEY_PATH=/app/data
+    volumes:
+      - ./weights:/app/models
+      - ./shared/api-data:/app/data
+    ports:
+      - "9001:8000"
     networks:
       - ai_network
 
