@@ -53,6 +53,12 @@ A distributed media processing tool designed for BBC creative teams. It integrat
   - Late acknowledgments  
   - Designed for long-running (30min+) AI workloads on GPUs (e.g., A100)
 
+- **Containerized Architecture**  
+  Each component (Controller, Worker, Redis) runs in its own Docker container for modularity and scalability
+
+- **Automatic First Aid**  
+  The system is designed to handle and recover from common failure scenarios (e.g., task timeouts, worker crashes) without manual intervention
+
 ---
 
 ## 4. GETTING STARTED
@@ -65,7 +71,7 @@ A distributed media processing tool designed for BBC creative teams. It integrat
 
 ### Deployment
 
-1. Copy the weights folder to the appropriate location following the structure outlined above.
+1. Copy the weights folder to the appropriate location following the structure outlined above. (Note: The shared volume and the api-data folder are shown above but you need to mannually create them and put the corresponding place following the stracture above.)
 
 2. Load the Docker images for the audio and visual services, respectively:
 
@@ -148,30 +154,53 @@ The pipeline utilizes **Celery Chords**:
    → Executes only after all header tasks complete  
 
 3. **Cleanup Phase**  
-   - Performs recursive deletion of the temporary workspace  
+   - Performs recursive deletion of the temporary video in workspace, the output json files are saved in the same workspace  
 
+The full workflow is demonstrated in the following diagram:
+
+```
+Client Request
+    |
+    v
+Controller API (FastAPI)   -> Downloader (S3/URL/Local) -> /shared/{job_id}/video.xxx 
+    |
+    v
++------------------+
+| Celery Chord     |
+|------------------|
+| Header Tasks     |
+| - process_audio  |
+| - process_visual |
+|------------------|
+| Callback Task    |
+| - finalize_results|
++------------------+
+    |
+    v
+Worker API (Celery Worker)
+    |
+    v
++------------------+
+| Task Execution   |
+| - Audio Analysis |
+| - Visual Analysis|
++------------------+
+    |
+    v
+Results Aggregation & Cleanup   -> /shared/{job_id}/ only cotains the output json files, the video file and intermediate files have been deleted 
+    |
+    v
+Client Response / Callback Notification
+```
+
+Note: The /shared/{job_id}/ directory will not be automatically deleted by orchestrator (reddis, controller, worker and autoheal). The reason is that we want to keep the output json files for the client and wait confirmation of the final export method (e.g. push to database, save local file, send to callback url).
 ---
 
-## 6. HEAVY AI WORKLOAD CONFIGURATION
-
-The worker is specifically configured to protect GPU VRAM and ensure task completion:
-
-- `--pool=solo`  
-  Ensures only one heavy AI model runs at a time (prevents OOM errors)
-
-- `visibility_timeout=3600`  
-  Allows tasks up to 1 hour without Redis prematurely re-dispatching them  
-
-- `worker_prefetch_multiplier=1`  
-  Prevents a single worker from hoarding tasks in its local queue  
-
----
-
-## 7. INDIVIDUAL SERVICE COMPONENT TESTING
+## 6. INDIVIDUAL SERVICE COMPONENT TESTING
 
 For the purpose of testing individual service components (audio and visual service) without Docker Compose, you can use the following commands. 
 
-### 7.1  Audio Service Testing
+### 6.1  Audio Service Testing
 
 Start the audio service container with the appropriate environment variables and volume mounts:
 ```bash
@@ -196,8 +225,51 @@ You can also check the service status by sending a GET request to the status end
 curl -X POST "http://localhost:9002/health"
 ```
 
-### 7.2  Visual Service Testing
+### 6.2  Visual Service Testing
 
+Docker running command for the visual service.
+```bash
+# Load image
+docker load -i narrative-api.tar
+
+# Create data directory for API keys
+mkdir -p ~/narrative-api-data
+
+# Run
+docker run -d \
+  --runtime=nvidia \
+  -e NVIDIA_VISIBLE_DEVICES=all \
+  -e ADMIN_KEY=your-admin-key \
+  --name narrative-api \
+  -v /path/to/weights:/app/models \
+  -v ~/narrative-api-data:/app/data \
+  -p 8000:8000 \
+  narrative-api
+
+# Check it is running (wait 1-2 min for model to load)
+curl http://localhost:8000/health
+```
+
+Once the service is running, you can generate the api-key following:
+```bash
+curl -X POST http://localhost:8000/api/keys/generate \
+  -H "X-Admin-Key: change-me-in-production" \
+  -H "Content-Type: application/json" \
+  -d '{"client_name": "client-ai4me", "expires_in_days": 365}'
+```
+
+Save the api_key value from the response — it is shown only once.
+
+And then you can send a test request to the visual service:
+```bash
+Analyse a video
+curl -X POST http://localhost:8000/analyze \
+  -H "X-API-Key: sk_your-api-key" \
+  -F "video=@/path/to/video.mp4" \
+  --output result.xml
+```
+
+Supported formats: mp4, avi, mov, mkv, webm
 
 ---
 

@@ -1,4 +1,18 @@
 services:
+
+  autoheal:
+    image: willfarrell/autoheal:latest
+    container_name: autoheal
+    restart: always
+    environment:
+      - AUTOHEAL_CONTAINER_LABEL=all
+      - AUTOHEAL_INTERVAL=60
+      - CURL_TIMEOUT=10
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    networks:
+      - ai_network
+
   redis:
     image: redis/redis-stack-server:latest
     container_name: redis
@@ -7,6 +21,7 @@ services:
       - "8001:8001" # Redis Insight GUI
     networks:
       - ai_network
+    restart: unless-stopped
 
   controller:
     build: ./controller
@@ -24,6 +39,7 @@ services:
       - redis
     networks:
       - ai_network
+    restart: unless-stopped
 
   worker:
     build: ./worker
@@ -47,6 +63,7 @@ services:
       - visualservice
     networks:
       - ai_network
+    restart: unless-stopped
 
   audioservice:
     image: audioservice:latest
@@ -65,10 +82,19 @@ services:
         reservations:
           devices:
             - driver: nvidia
-              count: 1
+              count: all
               capabilities: [ gpu ]
     networks:
       - ai_network
+    restart: always
+    healthcheck:
+      test: [ "CMD", "curl", "-f", "http://localhost:8000/health/" ]
+      interval: 1m
+      timeout: 30s
+      retries: 3
+      start_period: 5m
+    labels:
+      - autoheal=true
 
   visualservice:
     image: narrative-api:latest
@@ -90,6 +116,15 @@ services:
       - "9001:8000"
     networks:
       - ai_network
+    restart: always
+    healthcheck:
+      test: [ "CMD", "curl", "-f", "http://localhost:8000/health/" ]
+      interval: 1m
+      timeout: 30s
+      retries: 3
+      start_period: 5m
+    labels:
+      - autoheal=true
 
 networks:
   ai_network:

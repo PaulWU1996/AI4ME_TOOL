@@ -35,6 +35,7 @@ app.conf.update(
     worker_prefetch_multiplier=1,    # 公平调度：一次只领一个任务
     task_acks_late=True,             # 任务成功后再确认，防止崩溃丢任务
     result_persistent=True,          # 结果持久化
+    task_reject_on_worker_lost=True,     # 工作丢失时重试任务
 )
 
 # --- 3. 辅助函数：提取有效路径 ---
