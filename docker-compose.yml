@@ -110,7 +110,7 @@ services:
       - ADMIN_KEY=ai4me_admin_password # Replace with actual admin password
       - API_KEY_PATH=/app/data
     volumes:
-      - ./weights:/app/models
+      - ./weights/models:/app/models
       - ./shared/api-data:/app/data
     ports:
       - "9001:8000"
