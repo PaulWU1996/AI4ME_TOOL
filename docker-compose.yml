@@ -47,6 +47,12 @@ services:
     volumes:
       - ./shared:/app/tmp
       - ./data:/app/data
+      # Docker socket — allows worker to start/stop service containers
+      # Linux (default):        /var/run/docker.sock:/var/run/docker.sock
+      # macOS Colima:           ~/.colima/default/docker.sock:/var/run/docker.sock
+      # Windows Docker Desktop: //./pipe/docker_engine://./pipe/docker_engine
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./docker-compose.yml:/app/docker-compose.yml:ro
     environment:
       - REDIS_HOST=redis
       - REDIS_PORT=6379
@@ -56,16 +62,17 @@ services:
       - VISUAL_PORT=8000
       - SHARED_PATH=/app/tmp
       - ADMIN_KEY=ai4me_admin_password # Replace with actual admin password
-    command: celery -A tasks worker --loglevel=info --concurrency=2
+      - COMPOSE_PROJECT_DIR=${PWD}
+      - COMPOSE_FILE=/app/docker-compose.yml
+    command: celery -A tasks worker --loglevel=info --concurrency=1
     depends_on:
       - redis
-      - audioservice
-      - visualservice
     networks:
       - ai_network
     restart: unless-stopped
 
   audioservice:
+    profiles: [ "on-demand" ]
     image: audioservice:latest
     container_name: audioservice
     ports:
@@ -86,17 +93,16 @@ services:
               capabilities: [ gpu ]
     networks:
       - ai_network
-    restart: always
+    restart: no
     healthcheck:
       test: [ "CMD", "curl", "-f", "http://localhost:8000/health/" ]
       interval: 1m
       timeout: 30s
       retries: 3
       start_period: 5m
-    labels:
-      - autoheal=true
 
   visualservice:
+    profiles: [ "on-demand" ]
     image: narrative-api:latest
     container_name: visualservice
     deploy:
@@ -116,15 +122,13 @@ services:
       - "9001:8000"
     networks:
       - ai_network
-    restart: always
+    restart: no
     healthcheck:
       test: [ "CMD", "curl", "-f", "http://localhost:8000/health/" ]
       interval: 1m
       timeout: 30s
       retries: 3
       start_period: 5m
-    labels:
-      - autoheal=true
 
 networks:
   ai_network:

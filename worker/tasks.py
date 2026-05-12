@@ -1,55 +1,100 @@
 import os
 import time
-import shutil
 import requests
 import xmltodict
 import json
 from celery import Celery
+import subprocess
+import docker
+import glob
 
-# --- 1. 灵活配置区 (支持 Docker/Apptainer 环境变量) ---
+# --- Config Settings ---
+compose_file = os.getenv('COMPOSE_FILE', '/app/docker-compose.yml')
+project_dir = os.getenv('COMPOSE_PROJECT_DIR')
+
 redis_host = os.getenv('REDIS_HOST', '127.0.0.1')
 redis_port = os.getenv('REDIS_PORT', '6379')
 
-# 获取外部 Service 地址
+# Service URL
 audio_host = os.getenv('AUDIO_HOST', "localhost")
 audio_port = os.getenv('AUDIO_PORT', '9001')
 visual_host = os.getenv('VISUAL_HOST', "localhost")
 visual_port = os.getenv('VISUAL_PORT', '9002')
 visual_api_admin_key = os.getenv('ADMIN_KEY', 'ai4me_admin_password')
 
-# 拼接 API 完整路径 (注意：根据你之前的 FastAPI 代码，路径是 /process_audio/)
+
 audio_api_url = f"http://{audio_host}:{audio_port}/process_audio/"
-visual_api_url = f"http://{visual_host}:{visual_port}" # 这里假设视觉服务的 FastAPI 监听根路径，实际使用时请根据你的代码调整
+visual_api_url = f"http://{visual_host}:{visual_port}" 
 
 shared_path = os.getenv("SHARED_PATH", "/app/tmp")
-api_key_path = os.getenv("API_KEY_PATH", "/app/data") # 视觉服务 API key 存储路径
+api_key_path = os.getenv("API_KEY_PATH", "/app/data") 
 
-# --- 2. Celery 实例初始化 ---
+HEALTH_CHECK_TIMEOUT = 330
+HEALTH_CHECK_INTERVAL = 60
+
+docker_client = docker.from_env()
+
+# --- Celery ---
 app = Celery('tasks', 
              broker=f'redis://{redis_host}:{redis_port}/0', 
              backend=f'redis://{redis_host}:{redis_port}/0')
 
 app.conf.update(
-    broker_transport_options={'visibility_timeout': 3600},  # 1小时超时
-    result_expires=86400,            # 24小时过期
-    worker_prefetch_multiplier=1,    # 公平调度：一次只领一个任务
-    task_acks_late=True,             # 任务成功后再确认，防止崩溃丢任务
-    result_persistent=True,          # 结果持久化
-    task_reject_on_worker_lost=True,     # 工作丢失时重试任务
+    broker_transport_options={'visibility_timeout': 3600},  
+    result_expires=86400,            
+    worker_prefetch_multiplier=1,    
+    task_acks_late=True,             
+    result_persistent=True,          
+    task_reject_on_worker_lost=True, 
 )
 
-# --- 3. 辅助函数：提取有效路径 ---
+# --- Service Container Management ---
+def _compose(service_name, *args):
+    cmd = ["docker","compose","-f",compose_file]
+    if project_dir:
+        cmd += ["--project-directory", project_dir]
+    cmd += list(args) + [service_name]
+    subprocess.run(cmd, check=True)
+
+def start_service(service_name, max_retries=1):
+    for attempt in range(max_retries+1):
+        if attempt == 0:
+            _compose(service_name, "up", "-d")
+        else:
+            _compose(service_name, "restart")
+    
+        # health check
+        elapsed = 0
+        while elapsed < HEALTH_CHECK_TIMEOUT:
+            container = docker_client.containers.get(service_name)
+            container.reload()
+            health = container.attrs.get("State", {}).get("Health", {}).get("Status")
+            if health == "healthy":
+                return
+            time.sleep(HEALTH_CHECK_INTERVAL)
+            elapsed += HEALTH_CHECK_INTERVAL
+        else:
+            if attempt < max_retries:
+                print(f"[{service_name}] Health check failed after {HEALTH_CHECK_TIMEOUT}s. Retrying ({attempt}/{max_retries})...")
+            else:
+                print(f"[{service_name}] Health check failed after {HEALTH_CHECK_TIMEOUT}s. No more retries left.")
+
+    _compose(service_name, "stop")
+    raise RuntimeError(f"[Service Manager] {service_name} failed to become healthy!")
+
+def stop_service(service_name):
+    print(f"[Service Manager] Stopping {service_name}")
+    _compose(service_name, "stop")
+
+# --- Support functions ---
 def get_video_payload_path(full_path):
-    """
-    将 /app/tmp/uuid/video.mp4 转换为 uuid/video.mp4 
-    以匹配 FastAPI 后端的 SHARED_PATH 拼接逻辑
-    """
+
     path_parts = full_path.strip("/").split("/")
     if len(path_parts) < 2:
         return full_path
     return "/".join(path_parts[-2:])
 
-# --- 4. 任务定义 ---
+
 
 def save_to_disk(job_id, filename, data):
     output_dir = os.path.join(shared_path, job_id)
@@ -57,7 +102,7 @@ def save_to_disk(job_id, filename, data):
     with open(os.path.join(output_dir, filename), 'w', encoding='utf-8') as f:
         json.dump(data, f, indent=4, ensure_ascii=False)
 
-def ensure_api_key(api_dir="/app/data", admin_key=visual_api_admin_key): # change the api_dir
+def ensure_api_key(api_dir=api_key_path, admin_key=visual_api_admin_key): # change the api_dir
     key_file_path = os.path.join(api_dir, "api.key")
 
     if os.path.exists(key_file_path):
@@ -122,6 +167,8 @@ def extract_flat_captions(xml_body):
         for seg in raw_segments
     ]
 
+
+
 @app.task(name="tasks.process_visual")
 def process_visual(file_path):
     # file_path: /app/tmp/{task_id}/{filename}
@@ -131,12 +178,12 @@ def process_visual(file_path):
     job_id = path_parts[-2]
     file_name = path_parts[-1]
 
-    api_key = ensure_api_key()
-    if not api_key:
-        result_template["error"] = "Failed to obtain API key for visual service"
-        result_template["video_name"] = file_name
-        return result_template
+    start_service("visualservice", max_retries=1)
     try:
+        api_key = ensure_api_key()
+        if not api_key:
+            raise RuntimeError("Failed to obtain API key for visual service")
+
         print(f"[Visual Worker] Starting Task: {file_path}")
 
         if not os.path.exists(file_path):
@@ -168,6 +215,8 @@ def process_visual(file_path):
     except Exception as e:
         print(f"[Visual Worker] Error: {str(e)}")
         result_template["error"] = str(e)
+    finally:
+        stop_service("visualservice")
     return result_template
 
 
@@ -179,14 +228,14 @@ def process_audio(file_path):
     job_id = path_parts[-2]
     file_name = path_parts[-1]
 
+    start_service("audioservice", max_retries=1)
     try:
         print(f"[Audio Worker] Starting Task: {file_path}")
         
         if not os.path.exists(file_path):
-            result_template["error"] = f"Physical file check failed: {file_path}"
-            return result_template
+            raise FileNotFoundError(f"Physical file check failed: {file_path}")
 
-        # 关键点：转换路径格式为 {task_id}/{filename}
+        
         video_path_payload = get_video_payload_path(file_path)
         payload = {"video_path": video_path_payload}
 
@@ -223,61 +272,60 @@ def process_audio(file_path):
     except Exception as e:
         print(f"[Audio Worker] Error: {str(e)}")
         result_template["error"] = str(e)
-    
+    finally:
+        stop_service("audioservice")
     return result_template
 
 
 @app.task(name="tasks.finalize_results")
-def finalize_results(raw_results, job_id, callback_url=None):
+def finalize_results(job_id, callback_url=None):
     
-    audio_data = {}
-    visual_data = {}
-    video_name = "unknown_video"
-
-    for res in raw_results:
-        if not isinstance(res, dict):
-            continue
-        res_type = res.get("type")
-        if res_type == "audio":
-            audio_data = res
-            video_name = res.get("video_name", video_name)
-        elif res_type == "visual":
-            visual_data = res
-            video_name = res.get("video_name", video_name)
-
     workspace = os.path.join(shared_path, job_id)
 
-    all_success = all(res.get("success", False) for res in raw_results)
+    audio_files = glob.glob(os.path.join(workspace, "*_audio_output.json")) 
+    visual_files = glob.glob(os.path.join(workspace, "*_visual_output.json"))
 
-    video_name_no_ext = os.path.splitext(video_name)[0]
-    with open(os.path.join(workspace, f"{video_name_no_ext}_task_info.txt"), 'w') as f:
+    audio_data = json.load(open(audio_files[0], 'r')) if audio_files else None
+    visual_data = json.load(open(visual_files[0], 'r')) if visual_files else None
+
+    if audio_files:
+        video_name = os.path.basename(audio_files[0]).replace("_audio_output.json", "")
+    elif visual_files:
+        video_name = os.path.basename(visual_files[0]).replace("_visual_output.json", "")
+    else:
+        video_name = None
+
+    all_success = audio_data is not None and visual_data is not None
+
+    with open(os.path.join(workspace, "task_info.txt"), 'w') as f:
         f.write(f"Job ID: {job_id}\n")
         f.write(f"Video Name: {video_name}\n")
-        f.write(f"Status: {'Success' if all_success else 'Partial/Complete Failure'}\n")
+        f.write(f"Audio Files: {audio_files}\n")
+        f.write(f"Visual Files: {visual_files}\n")
+        f.write(f"Status: {'Success' if all_success else 'Partial/Failed'}\n")
 
-    video_full_path = os.path.join(workspace, video_name)
     if all_success:
-        if os.path.exists(video_full_path):
-            try:
-                os.remove(video_full_path)
-                print(f"[Cleanup] Deleted source video: {video_name}")
-            except Exception as e:
-                print(f"[Cleanup Warning] Failed to delete {video_name}: {e}")
-    else:
-        print(f"[Finalize] Not all tasks succeeded. Preserving source video for debugging: {video_name}")
+        # Clean up only all successful case to preserve data for debugging in failure cases
+        for f in os.listdir(workspace):
+            if not f.endswith(".json") and not f.endswith(".txt"):
+                try:
+                    os.remove(os.path.join(workspace, f))
+                    print(f"[Cleanup] Removed intermediate file: {f}")
+                except Exception as e:
+                    print(f"[Cleanup Warning] Retained file: {e}")   
 
     final_output = {
         "job_id": job_id,
-        "status": "success" if all_success else "partial_failure",
         "video_name": video_name,
-        "audio_result": audio_data.get("output"),
-        "visual_result": visual_data.get("output"),
+        "audio_result": audio_data,
+        "visual_result": visual_data,
+        "status": "success" if all_success else "partial/failed"
     }
 
     if callback_url:
-        try: 
-            requests.post(callback_url, json=final_output, timeout=10)
+        try:
+            requests.post(callback_url, json=final_output, timeout=30)
         except Exception as e:
-            print(f"[Callback Warning] Failed to send results to callback URL: {e}")
+            print(f"[Callback Warning] Failed to send callback: {str(e)}")
 
     return final_output

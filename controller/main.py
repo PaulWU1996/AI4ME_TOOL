@@ -1,7 +1,7 @@
 from fastapi import FastAPI, HTTPException
 from tasks import process_audio, process_visual, finalize_results
-from celery import group, uuid, chord
-from celery.result import AsyncResult, GroupResult
+from celery import uuid
+from celery.result import AsyncResult
 from downloader import UniversalDownloader
 import os
 import shutil
@@ -22,13 +22,12 @@ async def start_pipeline(path: str, callback_url: str = None):
        
         local_standard_path = downloader.download(input_path=path, task_id=job_id)
 
-        header = [
-            process_audio.s(local_standard_path),
-            process_visual.s(local_standard_path)
-        ]
-
-        callback = finalize_results.s(job_id, callback_url=callback_url)
-        chord(header)(callback.set(task_id=job_id))
+        (
+            process_audio.si(local_standard_path) |
+            process_visual.si(local_standard_path) |
+            finalize_results.si(job_id, callback_url=callback_url).set(task_id=job_id)
+        ).apply_async()
+        
         return {
             "status": "submitted",
             "job_id": job_id,
