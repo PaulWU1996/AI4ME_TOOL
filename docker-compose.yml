@@ -72,6 +72,7 @@ services:
       - "9002:8000"
     volumes:
       - ./shared:/app/tmp
+      - ./data:/app/data
       - ./weights:/app/weights
     environment:
       - SHARED_PATH=/app/tmp
@@ -110,8 +111,10 @@ services:
       - ADMIN_KEY=ai4me_admin_password # Replace with actual admin password
       - API_KEY_PATH=/app/data
     volumes:
-      - ./weights/models:/app/models
-      - ./shared/api-data:/app/data
+      - ./weights/model:/app/models
+      - ./shared:/app/tmp
+      - ./data:/app/data
+      # - ./shared/api-data:/app/data
     ports:
       - "9001:8000"
     networks:
