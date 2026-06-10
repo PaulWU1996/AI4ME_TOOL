@@ -2,7 +2,6 @@ import os
 import requests
 import boto3
 from urllib.parse import urlparse
-import uuid
 import shutil
 
 class UniversalDownloader:

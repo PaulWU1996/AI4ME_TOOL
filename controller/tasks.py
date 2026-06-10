@@ -18,11 +18,11 @@ app.conf.update(
 )
 
 @app.task
-def process_visual(file_path):
+def process_visual(payload):
     pass
 
 @app.task
-def process_audio(file_path):
+def process_audio(payload):
     pass
 
 @app.task(name="tasks.finalize_results")

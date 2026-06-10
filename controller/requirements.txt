@@ -4,3 +4,4 @@ celery
 redis
 boto3
 requests
+pydantic

@@ -87,15 +87,6 @@ def stop_service(service_name):
     _compose(service_name, "stop")
 
 # --- Support functions ---
-def get_video_payload_path(full_path):
-
-    path_parts = full_path.strip("/").split("/")
-    if len(path_parts) < 2:
-        return full_path
-    return "/".join(path_parts[-2:])
-
-
-
 def save_to_disk(job_id, filename, data):
     output_dir = os.path.join(shared_path, job_id)
     os.makedirs(output_dir, exist_ok=True)
@@ -170,13 +161,13 @@ def extract_flat_captions(xml_body):
 
 
 @app.task(name="tasks.process_visual")
-def process_visual(file_path):
+def process_visual(payload):
     # file_path: /app/tmp/{task_id}/{filename}
     result_template = {"type": "visual", "success": False, "video_name": None,"output": None, "error": None}
-    file_path = os.path.normpath(file_path)
-    path_parts = file_path.split(os.sep)
-    job_id = path_parts[-2]
-    file_name = path_parts[-1]
+    
+    file_path = os.path.normpath(payload["file_path"])
+    job_id = payload["job_id"]
+    file_name = os.path.basename(file_path)
 
     start_service("visualservice", max_retries=1)
     try:
@@ -192,6 +183,7 @@ def process_visual(file_path):
         headers = {"X-API-Key": api_key}
         analyze_url = visual_api_url + "/analyze"        
         # real API calling
+        # TODO: pass prompts to the service
         with open(file_path, 'rb') as f:
             files = {'video': f}
 
@@ -221,12 +213,19 @@ def process_visual(file_path):
 
 
 @app.task(name="tasks.process_audio")
-def process_audio(file_path):
+def process_audio(payload): # change filepath to dict inputs
+    """
+        payload = {
+            file_path: 
+            job_id:
+            prompts:
+        }
+    """    
     result_template = {"type": "audio", "success": False, "video_name": None, "output": None, "error": None}
-    file_path = os.path.normpath(file_path)
-    path_parts = file_path.split(os.sep)
-    job_id = path_parts[-2]
-    file_name = path_parts[-1]
+    
+    file_path = os.path.normpath(payload["file_path"])
+    job_id = payload["job_id"]
+    file_name = os.path.basename(file_path)
 
     start_service("audioservice", max_retries=1)
     try:
@@ -236,10 +235,13 @@ def process_audio(file_path):
             raise FileNotFoundError(f"Physical file check failed: {file_path}")
 
         
-        video_path_payload = get_video_payload_path(file_path)
-        payload = {"video_path": video_path_payload}
+        # video_path_payload = get_video_payload_path(file_path)
+        audio_payload = {
+            "video_path": f"{job_id}/{file_name}",
+            "prompts": payload["prompts"]
+            }
 
-        response = requests.post(audio_api_url, json=payload, timeout=1800)
+        response = requests.post(audio_api_url, json=audio_payload, timeout=1800)
         
         if response.status_code != 200:
             try:

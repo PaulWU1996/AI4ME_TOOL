@@ -6,26 +6,39 @@ from downloader import UniversalDownloader
 import os
 import shutil
 from tasks import app as celery_app
+from pydantic import BaseModel
+from typing import Optional
 
 SHARED_PATH = os.getenv("SHARED_PATH", "/app/tmp")
 
 app = FastAPI()
 downloader = UniversalDownloader(base_dir=SHARED_PATH)
 
+class ProcessRequest(BaseModel):
+    path: str
+    callback_url: Optional[str] = None
+    prompts: Optional[str] = None
+
 @app.post("/process")
-async def start_pipeline(path: str, callback_url: str = None):
+async def start_pipeline(request: ProcessRequest):
 
     job_id = uuid() 
     workspace = os.path.join(SHARED_PATH, job_id)
 
     try:
        
-        local_standard_path = downloader.download(input_path=path, task_id=job_id)
+        local_standard_path = downloader.download(input_path=request.path, task_id=job_id)
+
+        payload = {
+            "file_path": local_standard_path,
+            "job_id": job_id,
+            "prompts": request.prompts
+        }
 
         (
-            process_audio.si(local_standard_path) |
-            process_visual.si(local_standard_path) |
-            finalize_results.si(job_id, callback_url=callback_url).set(task_id=job_id)
+            process_audio.si(payload) |
+            process_visual.si(payload) |
+            finalize_results.si(job_id, callback_url=request.callback_url).set(task_id=job_id)
         ).apply_async()
         
         return {
