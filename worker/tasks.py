@@ -331,3 +331,7 @@ def finalize_results(job_id, callback_url=None):
             print(f"[Callback Warning] Failed to send callback: {str(e)}")
 
     return final_output
+
+@app.task(name="tasks.moments")
+def process_moment(payload):
+    pass
