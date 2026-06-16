@@ -1,9 +1,11 @@
 import os
 import time
+import shutil
 import requests
 import xmltodict
 import json
 from celery import Celery
+from urllib.parse import urlparse
 import subprocess
 import docker
 import glob
@@ -17,9 +19,9 @@ redis_port = os.getenv('REDIS_PORT', '6379')
 
 # Service URL
 audio_host = os.getenv('AUDIO_HOST', "localhost")
-audio_port = os.getenv('AUDIO_PORT', '9001')
+audio_port = os.getenv('AUDIO_PORT', '9002')
 visual_host = os.getenv('VISUAL_HOST', "localhost")
-visual_port = os.getenv('VISUAL_PORT', '9002')
+visual_port = os.getenv('VISUAL_PORT', '9001')
 visual_api_admin_key = os.getenv('ADMIN_KEY', 'ai4me_admin_password')
 
 
@@ -47,6 +49,38 @@ app.conf.update(
     result_persistent=True,          
     task_reject_on_worker_lost=True, 
 )
+
+# --- Download Task ---
+@app.task(name="tasks.download_file")
+def download_file(path, job_id, prompts=None):
+    output_dir = os.path.join(shared_path, job_id)
+    os.makedirs(output_dir, exist_ok=True)
+    try:
+        parsed = urlparse(path)
+        filename = os.path.basename(parsed.path)
+        dest = os.path.join(output_dir, filename)
+
+        if parsed.scheme == 's3':
+            import boto3
+            s3 = boto3.client('s3')
+            s3.download_file(parsed.netloc, parsed.path.lstrip('/'), dest)
+        elif parsed.scheme in ('http', 'https'):
+            with requests.get(path, stream=True) as r:
+                r.raise_for_status()
+                with open(dest, 'wb') as f:
+                    for chunk in r.iter_content(8192):
+                        f.write(chunk)
+        elif os.path.exists(path):
+            shutil.copy2(path, dest)
+        else:
+            raise ValueError(f"Unsupported or missing path: {path}")
+
+        print(f"[Downloader] File ready at {dest}")
+        return {"file_path": dest, "job_id": job_id, "prompts": prompts}
+    except Exception:
+        shutil.rmtree(output_dir, ignore_errors=True)
+        raise
+
 
 # --- Service Container Management ---
 def _compose(service_name, *args):
@@ -276,7 +310,7 @@ def process_audio(payload): # change filepath to dict inputs
         result_template["error"] = str(e)
     finally:
         stop_service("audioservice")
-    return result_template
+    return payload  # pass payload forward to process_visual
 
 
 @app.task(name="tasks.finalize_results")
@@ -287,8 +321,15 @@ def finalize_results(job_id, callback_url=None):
     audio_files = glob.glob(os.path.join(workspace, "*_audio_output.json")) 
     visual_files = glob.glob(os.path.join(workspace, "*_visual_output.json"))
 
-    audio_data = json.load(open(audio_files[0], 'r')) if audio_files else None
-    visual_data = json.load(open(visual_files[0], 'r')) if visual_files else None
+    audio_data = None
+    if audio_files:
+        with open(audio_files[0], 'r') as f:
+            audio_data = json.load(f)
+
+    visual_data = None
+    if visual_files:
+        with open(visual_files[0], 'r') as f:
+            visual_data = json.load(f)
 
     if audio_files:
         video_name = os.path.basename(audio_files[0]).replace("_audio_output.json", "")
@@ -330,6 +371,11 @@ def finalize_results(job_id, callback_url=None):
         except Exception as e:
             print(f"[Callback Warning] Failed to send callback: {str(e)}")
 
+    if not all_success:
+        raise RuntimeError(
+            f"Pipeline incomplete — audio: {'ok' if audio_data else 'missing'}, "
+            f"visual: {'ok' if visual_data else 'missing'}"
+        )
     return final_output
 
 @app.task(name="tasks.moments")

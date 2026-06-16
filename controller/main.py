@@ -1,18 +1,12 @@
 from fastapi import FastAPI, HTTPException
-from tasks import process_audio, process_visual, finalize_results
+from tasks import download_file, process_audio, process_visual, finalize_results
 from celery import uuid
 from celery.result import AsyncResult
-from downloader import UniversalDownloader
-import os
-import shutil
 from tasks import app as celery_app
 from pydantic import BaseModel
 from typing import Optional
 
-SHARED_PATH = os.getenv("SHARED_PATH", "/app/tmp")
-
 app = FastAPI()
-downloader = UniversalDownloader(base_dir=SHARED_PATH)
 
 class ProcessRequest(BaseModel):
     path: str
@@ -22,32 +16,20 @@ class ProcessRequest(BaseModel):
 @app.post("/process")
 async def start_pipeline(request: ProcessRequest):
 
-    job_id = uuid() 
-    workspace = os.path.join(SHARED_PATH, job_id)
+    job_id = uuid()
 
+    #TODO: considering all queue mode 
     try:
-       
-        local_standard_path = downloader.download(input_path=request.path, task_id=job_id)
-
-        payload = {
-            "file_path": local_standard_path,
-            "job_id": job_id,
-            "prompts": request.prompts
-        }
-
         (
-            process_audio.si(payload) |
-            process_visual.si(payload) |
+            download_file.si(request.path, job_id, prompts=request.prompts) |
+            process_audio.s() |
+            process_visual.s() |
             finalize_results.si(job_id, callback_url=request.callback_url).set(task_id=job_id)
         ).apply_async()
-        
-        return {
-            "status": "submitted",
-            "job_id": job_id,
-            "workspace": workspace
-        }
+
+        return {"status": "submitted", "job_id": job_id}
+
     except Exception as e:
-        if os.path.exists(workspace): shutil.rmtree(workspace)
         raise HTTPException(status_code=500, detail=str(e))
     
 
