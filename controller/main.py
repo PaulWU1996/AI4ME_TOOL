@@ -18,12 +18,11 @@ async def start_pipeline(request: ProcessRequest):
 
     job_id = uuid()
 
-    #TODO: considering all queue mode 
     try:
         (
             download_file.si(request.path, job_id, prompts=request.prompts) |
-            process_audio.s() |
             process_visual.s() |
+            process_audio.s() |
             finalize_results.si(job_id, callback_url=request.callback_url).set(task_id=job_id)
         ).apply_async()
 

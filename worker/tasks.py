@@ -197,11 +197,10 @@ def extract_flat_captions(xml_body):
 @app.task(name="tasks.process_visual")
 def process_visual(payload):
     # file_path: /app/tmp/{task_id}/{filename}
-    result_template = {"type": "visual", "success": False, "video_name": None,"output": None, "error": None}
-    
     file_path = os.path.normpath(payload["file_path"])
     job_id = payload["job_id"]
     file_name = os.path.basename(file_path)
+    visual_result = None
 
     start_service("visualservice", max_retries=1)
     try:
@@ -215,35 +214,30 @@ def process_visual(payload):
             raise FileNotFoundError(f"File not found: {file_path}")
 
         headers = {"X-API-Key": api_key}
-        analyze_url = visual_api_url + "/analyze"        
-        # real API calling
+        analyze_url = visual_api_url + "/analyze"
         # TODO: pass prompts to the service
         with open(file_path, 'rb') as f:
-            files = {'video': f}
-
             response = requests.post(
                 analyze_url,
                 headers=headers,
-                files=files,
+                files={'video': f},
                 timeout=6000
             )
-        
+
         response.raise_for_status()
-        xml_data = response.text
-
-        outputs = extract_flat_captions(xml_data)
-
-        result_template.update({"success": True, "video_name": file_name, "output": outputs})
+        visual_result = extract_flat_captions(response.text)
 
         file_name_no_ext = os.path.splitext(file_name)[0]
-        save_to_disk(job_id, f"{file_name_no_ext}_visual_output.json", result_template["output"])
+        save_to_disk(job_id, f"{file_name_no_ext}_visual_output.json", visual_result)
+        print(f"[Visual Worker] Success: {len(visual_result)} segments.")
 
     except Exception as e:
         print(f"[Visual Worker] Error: {str(e)}")
-        result_template["error"] = str(e)
     finally:
         stop_service("visualservice")
-    return result_template
+
+    # pass visual chunks forward so process_audio can use them for chunk splitting
+    return {**payload, "visual_result": visual_result}
 
 
 @app.task(name="tasks.process_audio")
@@ -269,11 +263,11 @@ def process_audio(payload): # change filepath to dict inputs
             raise FileNotFoundError(f"Physical file check failed: {file_path}")
 
         
-        # video_path_payload = get_video_payload_path(file_path)
         audio_payload = {
             "video_path": f"{job_id}/{file_name}",
-            "prompts": payload["prompts"]
-            }
+            "prompts": payload["prompts"],
+            "chunks": payload.get("visual_result"),  # visual segment boundaries for chunk splitting
+        }
 
         response = requests.post(audio_api_url, json=audio_payload, timeout=1800)
         
@@ -310,7 +304,7 @@ def process_audio(payload): # change filepath to dict inputs
         result_template["error"] = str(e)
     finally:
         stop_service("audioservice")
-    return payload  # pass payload forward to process_visual
+    return result_template
 
 
 @app.task(name="tasks.finalize_results")
