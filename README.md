@@ -159,38 +159,76 @@ The pipeline utilizes **Celery Chords**:
 The full workflow is demonstrated in the following diagram:
 
 ```
-Client Request
-    |
-    v
-Controller API (FastAPI)   -> Downloader (S3/URL/Local) -> /shared/{job_id}/video.xxx 
-    |
-    v
-+------------------+
-| Celery Chord     |
-|------------------|
-| Header Tasks     |
-| - process_audio  |
-| - process_visual |
-|------------------|
-| Callback Task    |
-| - finalize_results|
-+------------------+
-    |
-    v
-Worker API (Celery Worker)
-    |
-    v
-+------------------+
-| Task Execution   |
-| - Audio Analysis |
-| - Visual Analysis|
-+------------------+
-    |
-    v
-Results Aggregation & Cleanup   -> /shared/{job_id}/ only cotains the output json files, the video file and intermediate files have been deleted 
-    |
-    v
-Client Response / Callback Notification
+┌─────────────────────────────────────────────────────────────────────┐
+│                           CLIENT                                    │
+│  POST /process  {path, job_type, prompts, callback_url}             │
+└───────────────────────────┬─────────────────────────────────────────┘
+                            │ returns immediately
+                            │ {"status":"submitted","job_id":"..."}
+                            ▼
+┌─────────────────────────────────────────────────────────────────────┐
+│                     CONTROLLER  :9000                               │
+│  FastAPI — generates job_id, builds chain, calls .apply_async()     │
+└───────────────────────────┬─────────────────────────────────────────┘
+                            │ enqueue chain
+                            ▼
+┌─────────────────────────────────────────────────────────────────────┐
+│                     REDIS  :6379                                    │
+│  Celery broker + result backend                                     │
+│                                                                     │
+│  Queue:  [job_A] [job_B] [job_C] ...   ← jobs parallel in queue    │
+└───────────────────────────┬─────────────────────────────────────────┘
+                            │ worker picks up one job at a time
+                            ▼
+┌─────────────────────────────────────────────────────────────────────┐
+│                      WORKER  (Celery)                               │
+│                                                                     │
+│  Per-job sequential chain:                                          │
+│                                                                     │
+│  ① download_file                                                    │
+│     S3 / HTTP(S) / local → /app/tmp/{job_id}/{filename}            │
+│     returns: {file_path, job_id, prompts}                           │
+│            │                                                        │
+│            ▼                                                        │
+│  ② process_visual                                                   │
+│     starts visualservice → POST /analyze (upload video)            │
+│     parses XML → flat caption segments                              │
+│     saves {name}_visual_output.json                                 │
+│     stops visualservice                                             │
+│     returns: {file_path, job_id, prompts, visual_result}           │
+│            │                                                        │
+│            ▼                                                        │
+│  ③ process_audio                                                    │
+│     starts audioservice → POST /process_audio/                     │
+│     passes visual_result as chunk boundaries                        │
+│     saves {name}_audio_output.json                                  │
+│     stops audioservice                                              │
+│            │                                                        │
+│            ▼                                                        │
+│  ④ finalize_results  (task_id = job_id)                            │
+│     merges audio + visual JSON                                      │
+│     writes task_info.txt                                            │
+│     deletes raw video on success                                    │
+│     POST callback_url (if provided)                                 │
+│     stores final_output in Redis under job_id                       │
+└───────────────────────────┬─────────────────────────────────────────┘
+                            │
+              ┌─────────────┴──────────────┐
+              │                            │
+              ▼                            ▼
+  GET /status/{job_id}           callback_url  ← POST final_output
+  polls Redis AsyncResult
+  returns data when ready
+
+┌─────────────────────────────────────────────────────────────────────┐
+│                   SHARED VOLUME  ./shared → /app/tmp                │
+│                                                                     │
+│  /app/tmp/{job_id}/                                                 │
+│    ├── video.mp4              (deleted on success)                  │
+│    ├── video_visual_output.json                                     │
+│    ├── video_audio_output.json                                      │
+│    └── task_info.txt                                                │
+└─────────────────────────────────────────────────────────────────────┘
 ```
 
 Note: The /shared/{job_id}/ directory will not be automatically deleted by orchestrator (reddis, controller, worker and autoheal). The reason is that we want to keep the output json files for the client and wait confirmation of the final export method (e.g. push to database, save local file, send to callback url).
