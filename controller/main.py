@@ -1,5 +1,5 @@
 from fastapi import FastAPI, HTTPException
-from tasks import download_file, process_audio, process_visual, finalize_results
+from tasks import download_file, process_audio, process_visual, finalize_results, process_moment
 from celery import uuid
 from celery.result import AsyncResult
 from tasks import app as celery_app
@@ -8,25 +8,44 @@ from typing import Optional
 
 app = FastAPI()
 
+SUPPORTED_JOB_TYPES = ["full", "audio_only", "visual_only", "moments"]
+
 class ProcessRequest(BaseModel):
     path: str
     callback_url: Optional[str] = None
     prompts: Optional[str] = None
+    job_type: str = "full"
+
+def build_chain(request: ProcessRequest, job_id: str):
+    download = download_file.si(request.path, job_id, prompts=request.prompts)
+    finalize = finalize_results.si(job_id, callback_url=request.callback_url).set(task_id=job_id)
+
+    chains = {
+        "full": (
+            download | process_visual.s() | process_audio.s() | finalize
+        ),
+        "audio_only": (
+            download | process_audio.s() | finalize
+        ),
+        "visual_only": (
+            download | process_visual.s() | finalize
+        ),
+        "moments": (
+            download | process_moment.s() | finalize
+        ),
+    }
+    return chains.get(request.job_type)
 
 @app.post("/process")
 async def start_pipeline(request: ProcessRequest):
+    if request.job_type not in SUPPORTED_JOB_TYPES:
+        raise HTTPException(status_code=400, detail=f"Unsupported job_type '{request.job_type}'. Choose from: {SUPPORTED_JOB_TYPES}")
 
     job_id = uuid()
 
     try:
-        (
-            download_file.si(request.path, job_id, prompts=request.prompts) |
-            process_visual.s() |
-            process_audio.s() |
-            finalize_results.si(job_id, callback_url=request.callback_url).set(task_id=job_id)
-        ).apply_async()
-
-        return {"status": "submitted", "job_id": job_id}
+        build_chain(request, job_id).apply_async()
+        return {"status": "submitted", "job_id": job_id, "job_type": request.job_type}
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
