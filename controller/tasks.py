@@ -17,14 +17,22 @@ app.conf.update(
     result_persistent=True,  # 结果持久化到 Redis
 )
 
-@app.task
-def process_visual(file_path):
+@app.task(name="tasks.download_file")
+def download_file(path, job_id, prompts=None):
     pass
 
-@app.task
-def process_audio(file_path):
+@app.task(name="tasks.process_audio")
+def process_audio(payload):
+    pass
+
+@app.task(name="tasks.process_visual")
+def process_visual(payload):
     pass
 
 @app.task(name="tasks.finalize_results")
-def finalize_results(raw_results, job_id, callback_url=None):
+def finalize_results(job_id, callback_url=None):
+    pass
+
+@app.task(name="tasks.moments")
+def process_moment(payload):
     pass
