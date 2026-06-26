@@ -58,6 +58,10 @@ def download_file(path, job_id, prompts=None):
     try:
         parsed = urlparse(path)
         filename = os.path.basename(parsed.path)
+        if not os.path.splitext(filename)[1]:
+            ext = {"transcript": "txt", "audio": "wav"}.get(filename)
+            if ext:
+                filename = f"{filename}.{ext}"
         dest = os.path.join(output_dir, filename)
 
         if parsed.scheme == 's3':
