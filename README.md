@@ -29,7 +29,7 @@ A distributed media processing tool designed for BBC creative teams. It integrat
 |   |-- PALUniEncRdFc3Llama31_8B_s2
 |   |   |-- checkpoint-final
 |   |-- models
-|-- init.sh              # Initialization script for setting up the environment for visual service 
+|   |-- ollama          # Ollama model weights for transcript service
 |-- README.md            # Project documentation (this file) 
 ```
 
@@ -83,11 +83,17 @@ docker load -i narrative-api.tar
 
 - The audioservice.tar is the image for the audio service and produced by Tony (audio llm) and Paul (plugin wrapper and docker design). It has been tested and works with the current codebase.
 
-3. Start the entire stack using Docker Compose:
+3. Load the Docker image for the transcript service:
+
+```bash
+docker load -i transcriptservice.tar
+```
+
+4. Start the entire stack using Docker Compose:
 ```bash
 docker-compose up --build
 ```
-There will be several services starting up, including Redis, the Controller API, the Worker API, the audio service and the visual service. The Controller and Worker will connect to Redis for task orchestration.
+There will be several services starting up, including Redis, the Controller API, and the Worker. The audio, visual, and transcript services start on-demand when a job requires them. The Controller and Worker will connect to Redis for task orchestration.
 
 Once compose completed, the TOOL API will be available at:
 
@@ -113,6 +119,11 @@ curl -X POST "http://localhost:9000/process" \
 curl -X POST "http://localhost:9000/process" \
   -H "Content-Type: application/json" \
   -d '{"path": "/app/data/video.mp4", "job_type": "audio_only"}'
+
+# Moments (transcript analysis)
+curl -X POST "http://localhost:9000/process" \
+  -H "Content-Type: application/json" \
+  -d '{"path": "http://localhost:8000/49794ede-.../transcript?start=1781183300&end=1781183700", "job_type": "moments", "prompts": "summarise key moments"}'
 
 # With callback and prompts
 curl -X POST "http://localhost:9000/process" \
@@ -159,14 +170,16 @@ The pipeline uses **Celery Chains** — tasks within a job execute sequentially.
 
 **Job types and their chains:**
 
-| `job_type` | Chain |
-|---|---|
-| `full` | `download_file` → `process_visual` → `process_audio` → `finalize_results` |
-| `audio_only` | `download_file` → `process_audio` → `finalize_results` |
-| `visual_only` | `download_file` → `process_visual` → `finalize_results` |
-| `moments` | `download_file` → `process_moment` → `finalize_results` |
+| `job_type` | Chain | Success condition |
+|---|---|---|
+| `full` | `download_file` → `process_visual` → `process_audio` → `finalize_results` | both audio + visual present |
+| `audio_only` | `download_file` → `process_audio` → `finalize_results` | audio present |
+| `visual_only` | `download_file` → `process_visual` → `finalize_results` | visual present |
+| `moments` | `download_file` → `process_moment` | transcript service returns result |
 
-`finalize_results` always runs last: it merges output JSON files, writes `task_info.txt`, deletes the raw video on success, and optionally POSTs to `callback_url`.
+For `full`, `audio_only`, and `visual_only`, `finalize_results` runs last: it merges output JSON files from the shared volume, writes `task_info.txt`, deletes the raw video on success, and optionally POSTs to `callback_url`.
+
+For `moments`, `process_moment` is the terminal task (no finalize step). It calls `transcriptservice` with the `job_id`, which locates the downloaded file on the shared volume directly. The result is stored in Redis under `job_id` and retrievable via `/status/{job_id}`.
 
 The full workflow is demonstrated in the following diagram:
 
@@ -217,8 +230,16 @@ The full workflow is demonstrated in the following diagram:
 │     stops audioservice                                              │
 │            │                                                        │
 │            ▼                                                        │
-│  ④ finalize_results  (task_id = job_id)                            │
-│     merges audio + visual JSON                                      │
+│  ② process_moment  (moments only, replaces audio + visual)         │
+│     starts transcriptservice → POST /process/                      │
+│     service locates file via job_id on shared volume               │
+│     stops transcriptservice                                         │
+│     stores result in Redis under job_id  ← terminal task           │
+│            │                                                        │
+│            ▼                                                        │
+│  ④ finalize_results  (full / audio_only / visual_only only)        │
+│     merges audio + visual JSON from shared volume                   │
+│     evaluates success per job_type                                  │
 │     writes task_info.txt                                            │
 │     deletes raw video on success                                    │
 │     POST callback_url (if provided)                                 │
@@ -236,10 +257,11 @@ The full workflow is demonstrated in the following diagram:
 │                   SHARED VOLUME  ./shared → /app/tmp                │
 │                                                                     │
 │  /app/tmp/{job_id}/                                                 │
-│    ├── video.mp4              (deleted on success)                  │
-│    ├── video_visual_output.json                                     │
-│    ├── video_audio_output.json                                      │
-│    └── task_info.txt                                                │
+│    ├── video.mp4                  (deleted on success)              │
+│    ├── video_visual_output.json   (full / visual_only)              │
+│    ├── video_audio_output.json    (full / audio_only)               │
+│    ├── moment_output.json         (moments)                         │
+│    └── task_info.txt              (full / audio_only / visual_only) │
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
