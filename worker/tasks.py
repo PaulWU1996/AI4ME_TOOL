@@ -23,10 +23,13 @@ audio_port = os.getenv('AUDIO_PORT', '9002')
 visual_host = os.getenv('VISUAL_HOST', "localhost")
 visual_port = os.getenv('VISUAL_PORT', '9001')
 visual_api_admin_key = os.getenv('ADMIN_KEY', 'ai4me_admin_password')
+transcript_host = os.getenv('TRANSCRIPT_HOST', "localhost")
+transcript_port = os.getenv('TRANSCRIPT_PORT', '9003')
 
 
 audio_api_url = f"http://{audio_host}:{audio_port}/process_audio/"
-visual_api_url = f"http://{visual_host}:{visual_port}" 
+visual_api_url = f"http://{visual_host}:{visual_port}"
+transcript_api_url = f"http://{transcript_host}:{transcript_port}/process/" 
 
 shared_path = os.getenv("SHARED_PATH", "/app/tmp")
 api_key_path = os.getenv("API_KEY_PATH", "/app/data") 
@@ -312,7 +315,7 @@ def process_audio(payload): # change filepath to dict inputs
 
 
 @app.task(name="tasks.finalize_results")
-def finalize_results(job_id, callback_url=None):
+def finalize_results(job_id, job_type="full", callback_url=None):
     
     workspace = os.path.join(shared_path, job_id)
 
@@ -336,7 +339,11 @@ def finalize_results(job_id, callback_url=None):
     else:
         video_name = None
 
-    all_success = audio_data is not None and visual_data is not None
+    all_success = {
+        "full":        audio_data is not None and visual_data is not None,
+        "audio_only":  audio_data is not None,
+        "visual_only": visual_data is not None,
+    }.get(job_type, False)
 
     with open(os.path.join(workspace, "task_info.txt"), 'w') as f:
         f.write(f"Job ID: {job_id}\n")
@@ -376,6 +383,35 @@ def finalize_results(job_id, callback_url=None):
         )
     return final_output
 
+
 @app.task(name="tasks.moments")
 def process_moment(payload):
-    pass
+    job_id = payload.get("job_id")
+    result_template = {"type": "moments", "success": False, "output": None, "error": None}
+
+    try:
+        start_service("transcriptservice", max_retries=1)
+        print(f"[Moment Worker] Starting Task: {job_id}")
+
+        moment_payload = {
+            "job_id": job_id,
+            "job_type": "script",
+            "prompts": payload.get("prompts")
+        }
+
+        response = requests.post(transcript_api_url, json=moment_payload, timeout=1800)
+        response.raise_for_status()
+
+        result = response.json()
+        result_template.update({"success": True, "output": result})
+
+        # save_to_disk(job_id, "moment_output.json", result)
+        print(f"[Moment Worker] Success.")
+
+    except Exception as e:
+        print(f"[Moment Worker] Error: {str(e)}")
+        result_template["error"] = str(e)
+    finally:
+        stop_service("transcriptservice")
+
+    return {**payload, "moment_result": result_template}                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           

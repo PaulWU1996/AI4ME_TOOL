@@ -18,7 +18,7 @@ class ProcessRequest(BaseModel):
 
 def build_chain(request: ProcessRequest, job_id: str):
     download = download_file.si(request.path, job_id, prompts=request.prompts)
-    finalize = finalize_results.si(job_id, callback_url=request.callback_url).set(task_id=job_id)
+    finalize = finalize_results.si(job_id, job_type=request.job_type, callback_url=request.callback_url).set(task_id=job_id)
 
     chains = {
         "full": (
@@ -31,7 +31,7 @@ def build_chain(request: ProcessRequest, job_id: str):
             download | process_visual.s() | finalize
         ),
         "moments": (
-            download | process_moment.s() | finalize
+            download | process_moment.s().set(task_id=job_id)
         ),
     }
     return chains.get(request.job_type)
