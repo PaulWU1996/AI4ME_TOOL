@@ -41,6 +41,7 @@ services:
       - redis
     networks:
       - ai_network
+      - shared_network
     restart: unless-stopped
     labels:
       - "autoheal=true"
@@ -67,9 +68,7 @@ services:
       - TRANSCRIPT_HOST=transcriptservice
       - TRANSCRIPT_PORT=8000
       - SHARED_PATH=/app/tmp
-      - ADMIN_KEY=ai4me_admin_password # Replace with actual admin password
-      - TRANSCRIPT_HOST=transcriptservice
-      - TRANSCRIPT_PORT=8000
+      - ADMIN_KEY={AI4ME_ADMIN_PASSWORD}
       - COMPOSE_PROJECT_DIR=${PWD}
       - COMPOSE_FILE=/app/docker-compose.yml
     command: celery -A tasks worker --loglevel=info --concurrency=1
@@ -123,7 +122,7 @@ services:
               count: all
               capabilities: [ gpu ]
     environment:
-      - ADMIN_KEY=ai4me_admin_password # Replace with actual admin password
+      - ADMIN_KEY={AI4ME_ADMIN_PASSWORD}
       - API_KEY_PATH=/app/data
     volumes:
       - ./weights/models:/app/models
@@ -167,4 +166,7 @@ services:
 
 networks:
   ai_network:
-    driver: bridge
+    driver: bridge 
+  shared_network: # comment out and remove from controller if running standalone
+    external: true
+    name: moments_gateway
