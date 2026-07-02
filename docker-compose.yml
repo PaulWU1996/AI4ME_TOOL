@@ -68,7 +68,7 @@ services:
       - TRANSCRIPT_HOST=transcriptservice
       - TRANSCRIPT_PORT=8000
       - SHARED_PATH=/app/tmp
-      - ADMIN_KEY={AI4ME_ADMIN_PASSWORD}
+      - ADMIN_KEY=${AI4ME_ADMIN_PASSWORD}
       - COMPOSE_PROJECT_DIR=${PWD}
       - COMPOSE_FILE=/app/docker-compose.yml
     command: celery -A tasks worker --loglevel=info --concurrency=1
@@ -122,7 +122,7 @@ services:
               count: all
               capabilities: [ gpu ]
     environment:
-      - ADMIN_KEY={AI4ME_ADMIN_PASSWORD}
+      - ADMIN_KEY=${AI4ME_ADMIN_PASSWORD}
       - API_KEY_PATH=/app/data
     volumes:
       - ./weights/models:/app/models
