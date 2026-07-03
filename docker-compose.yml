@@ -70,7 +70,7 @@ services:
       - ADMIN_KEY=ai4me_admin_password # Replace with actual admin password
       - TRANSCRIPT_HOST=transcriptservice
       - TRANSCRIPT_PORT=8000
-      - COMPOSE_PROJECT_DIR=${PWD}
+      - COMPOSE_PROJECT_DIR=/home/ubuntu/tb/AI4ME/AI4ME_TOOL # ${PWD}
       - COMPOSE_FILE=/app/docker-compose.yml
     command: celery -A tasks worker --loglevel=info --concurrency=1
     depends_on:
