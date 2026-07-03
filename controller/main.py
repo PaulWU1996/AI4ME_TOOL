@@ -1,41 +1,53 @@
 from fastapi import FastAPI, HTTPException
-from tasks import process_audio, process_visual, finalize_results
-from celery import group, uuid, chord
-from celery.result import AsyncResult, GroupResult
-from downloader import UniversalDownloader
-import os
-import shutil
+from tasks import download_file, process_audio, process_visual, finalize_results, process_moment
+from celery import uuid
+from celery.result import AsyncResult
 from tasks import app as celery_app
-
-SHARED_PATH = os.getenv("SHARED_PATH", "/app/tmp")
+from pydantic import BaseModel
+from typing import Optional
 
 app = FastAPI()
-downloader = UniversalDownloader(base_dir=SHARED_PATH)
+
+SUPPORTED_JOB_TYPES = ["full", "audio_only", "visual_only", "moments"]
+
+class ProcessRequest(BaseModel):
+    path: str
+    callback_url: Optional[str] = None
+    prompts: Optional[str] = None
+    job_type: str = "full"
+
+def build_chain(request: ProcessRequest, job_id: str):
+    download = download_file.si(request.path, job_id, prompts=request.prompts)
+    finalize = finalize_results.si(job_id, job_type=request.job_type, callback_url=request.callback_url).set(task_id=job_id)
+
+    chains = {
+        "full": (
+            download | process_visual.s() | process_audio.s() | finalize
+        ),
+        "audio_only": (
+            download | process_audio.s() | finalize
+        ),
+        "visual_only": (
+            download | process_visual.s() | finalize
+        ),
+        "moments": (
+            download | process_moment.s().set(task_id=job_id)
+        ),
+    }
+    return chains.get(request.job_type)
 
 @app.post("/process")
-async def start_pipeline(path: str, callback_url: str = None):
+async def start_pipeline(request: ProcessRequest):
+    if request.job_type not in SUPPORTED_JOB_TYPES:
+        raise HTTPException(status_code=400, detail=f"Unsupported job_type '{request.job_type}'. Choose from: {SUPPORTED_JOB_TYPES}")
 
-    job_id = uuid() 
-    workspace = os.path.join(SHARED_PATH, job_id)
+    job_id = uuid()
 
     try:
-       
-        local_standard_path = downloader.download(input_path=path, task_id=job_id)
+        build_chain(request, job_id).apply_async()
+        return {"status": "submitted", "job_id": job_id, "job_type": request.job_type}
 
-        header = [
-            process_audio.s(local_standard_path),
-            process_visual.s(local_standard_path)
-        ]
-
-        callback = finalize_results.s(job_id, callback_url=callback_url)
-        chord(header)(callback.set(task_id=job_id))
-        return {
-            "status": "submitted",
-            "job_id": job_id,
-            "workspace": workspace
-        }
     except Exception as e:
-        if os.path.exists(workspace): shutil.rmtree(workspace)
         raise HTTPException(status_code=500, detail=str(e))
     
 

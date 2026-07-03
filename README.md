@@ -29,7 +29,7 @@ A distributed media processing tool designed for BBC creative teams. It integrat
 |   |-- PALUniEncRdFc3Llama31_8B_s2
 |   |   |-- checkpoint-final
 |   |-- models
-|-- init.sh              # Initialization script for setting up the environment for visual service 
+|   |-- ollama          # Ollama model weights for transcript service
 |-- README.md            # Project documentation (this file) 
 ```
 
@@ -40,8 +40,8 @@ A distributed media processing tool designed for BBC creative teams. It integrat
 - **Universal Ingestion**  
   Support for S3, HTTP/HTTPS, and local file paths  
 
-- **Parallel Processing**  
-  Uses Celery Chords to run heavy audio and visual analysis simultaneously  
+- **Multiple Job Types**  
+  Supports `full`, `audio_only`, `visual_only`, and `moments` pipelines via a single endpoint  
 
 - **Automated Cleanup**  
   The worker automatically deletes `/app/tmp/<job_id>` once processing is finalized to prevent disk overflow  
@@ -83,11 +83,17 @@ docker load -i narrative-api.tar
 
 - The audioservice.tar is the image for the audio service and produced by Tony (audio llm) and Paul (plugin wrapper and docker design). It has been tested and works with the current codebase.
 
-3. Start the entire stack using Docker Compose:
+3. Load the Docker image for the transcript service:
+
+```bash
+docker load -i transcriptservice.tar
+```
+
+4. Start the entire stack using Docker Compose:
 ```bash
 docker-compose up --build
 ```
-There will be several services starting up, including Redis, the Controller API, the Worker API, the audio service and the visual service. The Controller and Worker will connect to Redis for task orchestration.
+There will be several services starting up, including Redis, the Controller API, and the Worker. The audio, visual, and transcript services start on-demand when a job requires them. The Controller and Worker will connect to Redis for task orchestration.
 
 Once compose completed, the TOOL API will be available at:
 
@@ -101,27 +107,45 @@ http://localhost:9000
 
 #### Start Processing
 
-- **Endpoint:** `POST /process?path={media_path}&callback_url={optional_callback}`
+- **Endpoint:** `POST /process` (JSON body)
 
 ```bash
-curl -X POST "http://localhost:9000/process?path=/app/data/video.mp4"
+# Full pipeline (default)
+curl -X POST "http://localhost:9000/process" \
+  -H "Content-Type: application/json" \
+  -d '{"path": "/app/data/video.mp4"}'
+
+# Audio only
+curl -X POST "http://localhost:9000/process" \
+  -H "Content-Type: application/json" \
+  -d '{"path": "/app/data/video.mp4", "job_type": "audio_only"}'
+
+# Moments (transcript analysis)
+curl -X POST "http://localhost:9000/process" \
+  -H "Content-Type: application/json" \
+  -d '{"path": "http://localhost:8000/49794ede-.../transcript?start=1781183300&end=1781183700", "job_type": "moments", "prompts": "summarise key moments"}'
+
+# With callback and prompts
+curl -X POST "http://localhost:9000/process" \
+  -H "Content-Type: application/json" \
+  -d '{"path": "https://example.com/video.mp4", "job_type": "full", "callback_url": "https://your-server/callback", "prompts": "describe the scene"}'
 ```
 
-Returns a `job_id` used for tracking the asynchronous workflow. If `callback_url` is provided, results will be sent there once processing is complete. Otherwise, results can be retrieved via the status endpoint.
+**Request fields:**
 
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `path` | string | required | Media source: local path, HTTP/HTTPS URL, or S3 URI |
+| `job_type` | string | `"full"` | `full` / `audio_only` / `visual_only` / `moments` |
+| `prompts` | string | null | Custom analysis prompt passed to services |
+| `callback_url` | string | null | Webhook to POST results to on completion |
 
-The `path` parameter supports:
-- Local file paths (e.g., `/app/data/video.mp4`)
-- HTTP/HTTPS URLs (e.g., `https://example.com/video.mp4`)
-- S3 paths (e.g., `s3://bucket/key` - requires AWS credentials to be configured in the Controller environment) [Currently not tested with S3, but the downloader.py has the logic to support S3 download using boto3, so it should work as long as the AWS credentials are properly set up in the Controller container]
+Returns a `job_id` immediately. If `callback_url` is provided, results are also POSTed there when complete.
 
 Once the request is received, the Controller will:
-1. Create a unique `job_id` and corresponding temporary workspace at `/app/tmp/{job_id}`
-2. Download the media file into this workspace using `downloader.py`
-3. Dispatch Celery tasks for audio and visual processing in parallel
-4. Monitor task completion and aggregate results once all tasks are finished
-5. Clean up the temporary workspace to free disk space
-6. Return combined results to the client or send them to the provided `callback_url` if specified
+1. Validate `job_type` and generate a unique `job_id`
+2. Build the appropriate Celery chain and enqueue it
+3. Return `{"status": "submitted", "job_id": "...", "job_type": "..."}` immediately
 
 Note: The outputs (audio and visual analysis results, as well the task info) will be saved in the shared volume workspace under `/app/tmp/{job_id}/` before being returned to the client or sent to the callback URL. You can also check the outputs on the host machine by navigating to the corresponding directory in the shared volume (e.g., `/your/path/to/shared_vol/{job_id}/`) while the processing is still running or after it has completed. This can be useful for debugging or verifying intermediate results.
 
@@ -142,55 +166,103 @@ Returns combined JSON results once `is_ready` is `true`.
 
 ## 5. TASK ORCHESTRATION DETAILS
 
-The pipeline utilizes **Celery Chords**:
+The pipeline uses **Celery Chains** — tasks within a job execute sequentially. Multiple jobs run in parallel across the queue.
 
-1. **Header Tasks**  
-   - `process_audio`  
-   - `process_visual`  
-   → Dispatched in parallel via Redis queue  
+**Job types and their chains:**
 
-2. **Callback Task**  
-   - `finalize_results`  
-   → Executes only after all header tasks complete  
+| `job_type` | Chain | Success condition |
+|---|---|---|
+| `full` | `download_file` → `process_visual` → `process_audio` → `finalize_results` | both audio + visual present |
+| `audio_only` | `download_file` → `process_audio` → `finalize_results` | audio present |
+| `visual_only` | `download_file` → `process_visual` → `finalize_results` | visual present |
+| `moments` | `download_file` → `process_moment` | transcript service returns result |
 
-3. **Cleanup Phase**  
-   - Performs recursive deletion of the temporary video in workspace, the output json files are saved in the same workspace  
+For `full`, `audio_only`, and `visual_only`, `finalize_results` runs last: it merges output JSON files from the shared volume, writes `task_info.txt`, deletes the raw video on success, and optionally POSTs to `callback_url`.
+
+For `moments`, `process_moment` is the terminal task (no finalize step). It calls `transcriptservice` with the `job_id`, which locates the downloaded file on the shared volume directly. The result is stored in Redis under `job_id` and retrievable via `/status/{job_id}`.
 
 The full workflow is demonstrated in the following diagram:
 
 ```
-Client Request
-    |
-    v
-Controller API (FastAPI)   -> Downloader (S3/URL/Local) -> /shared/{job_id}/video.xxx 
-    |
-    v
-+------------------+
-| Celery Chord     |
-|------------------|
-| Header Tasks     |
-| - process_audio  |
-| - process_visual |
-|------------------|
-| Callback Task    |
-| - finalize_results|
-+------------------+
-    |
-    v
-Worker API (Celery Worker)
-    |
-    v
-+------------------+
-| Task Execution   |
-| - Audio Analysis |
-| - Visual Analysis|
-+------------------+
-    |
-    v
-Results Aggregation & Cleanup   -> /shared/{job_id}/ only cotains the output json files, the video file and intermediate files have been deleted 
-    |
-    v
-Client Response / Callback Notification
+┌─────────────────────────────────────────────────────────────────────┐
+│                           CLIENT                                    │
+│  POST /process  {path, job_type, prompts, callback_url}             │
+└───────────────────────────┬─────────────────────────────────────────┘
+                            │ returns immediately
+                            │ {"status":"submitted","job_id":"..."}
+                            ▼
+┌─────────────────────────────────────────────────────────────────────┐
+│                     CONTROLLER  :9000                               │
+│  FastAPI — generates job_id, builds chain, calls .apply_async()     │
+└───────────────────────────┬─────────────────────────────────────────┘
+                            │ enqueue chain
+                            ▼
+┌─────────────────────────────────────────────────────────────────────┐
+│                     REDIS  :6379                                    │
+│  Celery broker + result backend                                     │
+│                                                                     │
+│  Queue:  [job_A] [job_B] [job_C] ...   ← jobs parallel in queue    │
+└───────────────────────────┬─────────────────────────────────────────┘
+                            │ worker picks up one job at a time
+                            ▼
+┌─────────────────────────────────────────────────────────────────────┐
+│                      WORKER  (Celery)                               │
+│                                                                     │
+│  Per-job sequential chain:                                          │
+│                                                                     │
+│  ① download_file                                                    │
+│     S3 / HTTP(S) / local → /app/tmp/{job_id}/{filename}            │
+│     returns: {file_path, job_id, prompts}                           │
+│            │                                                        │
+│            ▼                                                        │
+│  ② process_visual  (skipped for audio_only / moments)              │
+│     starts visualservice → POST /analyze (upload video)            │
+│     parses XML → flat caption segments                              │
+│     saves {name}_visual_output.json                                 │
+│     stops visualservice                                             │
+│     returns: {file_path, job_id, prompts, visual_result}           │
+│            │                                                        │
+│            ▼                                                        │
+│  ③ process_audio  (skipped for visual_only / moments)              │
+│     starts audioservice → POST /process_audio/                     │
+│     passes visual_result as chunk boundaries                        │
+│     saves {name}_audio_output.json                                  │
+│     stops audioservice                                              │
+│            │                                                        │
+│            ▼                                                        │
+│  ② process_moment  (moments only, replaces audio + visual)         │
+│     starts transcriptservice → POST /process/                      │
+│     service locates file via job_id on shared volume               │
+│     stops transcriptservice                                         │
+│     stores result in Redis under job_id  ← terminal task           │
+│            │                                                        │
+│            ▼                                                        │
+│  ④ finalize_results  (full / audio_only / visual_only only)        │
+│     merges audio + visual JSON from shared volume                   │
+│     evaluates success per job_type                                  │
+│     writes task_info.txt                                            │
+│     deletes raw video on success                                    │
+│     POST callback_url (if provided)                                 │
+│     stores final_output in Redis under job_id                       │
+└───────────────────────────┬─────────────────────────────────────────┘
+                            │
+              ┌─────────────┴──────────────┐
+              │                            │
+              ▼                            ▼
+  GET /status/{job_id}           callback_url  ← POST final_output
+  polls Redis AsyncResult
+  returns data when ready
+
+┌─────────────────────────────────────────────────────────────────────┐
+│                   SHARED VOLUME  ./shared → /app/tmp                │
+│                                                                     │
+│  /app/tmp/{job_id}/                                                 │
+│    ├── video.mp4                  (deleted on success)              │
+│    ├── video_visual_output.json   (full / visual_only)              │
+│    ├── video_audio_output.json    (full / audio_only)               │
+│    ├── moment_output.json         (moments)                         │
+│    └── task_info.txt              (full / audio_only / visual_only) │
+└─────────────────────────────────────────────────────────────────────┘
 ```
 
 Note: The /shared/{job_id}/ directory will not be automatically deleted by orchestrator (reddis, controller, worker and autoheal). The reason is that we want to keep the output json files for the client and wait confirmation of the final export method (e.g. push to database, save local file, send to callback url).
@@ -313,7 +385,9 @@ apptainer exec \
 
 curl test command:
 ```
-curl -X POST "http://127.0.0.1:9000/process?path=https://www.w3schools.com/html/mov_bbb.mp4"
+curl -X POST "http://127.0.0.1:9000/process" \
+  -H "Content-Type: application/json" \
+  -d '{"path": "https://www.w3schools.com/html/mov_bbb.mp4"}'
 ```
 
 ```

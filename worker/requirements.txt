@@ -2,3 +2,5 @@ celery
 redis
 requests
 xmltodict
+docker
+boto3

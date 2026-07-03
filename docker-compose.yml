@@ -5,7 +5,7 @@ services:
     container_name: autoheal
     restart: always
     environment:
-      - AUTOHEAL_CONTAINER_LABEL=all
+      - AUTOHEAL_CONTAINER_LABEL=autoheal
       - AUTOHEAL_INTERVAL=60
       - CURL_TIMEOUT=10
     volumes:
@@ -22,6 +22,8 @@ services:
     networks:
       - ai_network
     restart: unless-stopped
+    labels:
+      - "autoheal=true"
 
   controller:
     build: ./controller
@@ -40,6 +42,8 @@ services:
     networks:
       - ai_network
     restart: unless-stopped
+    labels:
+      - "autoheal=true"
 
   worker:
     build: ./worker
@@ -47,6 +51,12 @@ services:
     volumes:
       - ./shared:/app/tmp
       - ./data:/app/data
+      # Docker socket — allows worker to start/stop service containers
+      # Linux (default):        /var/run/docker.sock:/var/run/docker.sock
+      # macOS Colima:           ~/.colima/default/docker.sock:/var/run/docker.sock
+      # Windows Docker Desktop: //./pipe/docker_engine://./pipe/docker_engine
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./docker-compose.yml:/app/docker-compose.yml:ro
     environment:
       - REDIS_HOST=redis
       - REDIS_PORT=6379
@@ -54,18 +64,25 @@ services:
       - AUDIO_PORT=8000
       - VISUAL_HOST=visualservice
       - VISUAL_PORT=8000
+      - TRANSCRIPT_HOST=transcriptservice
+      - TRANSCRIPT_PORT=8000
       - SHARED_PATH=/app/tmp
       - ADMIN_KEY=ai4me_admin_password # Replace with actual admin password
-    command: celery -A tasks worker --loglevel=info --concurrency=2
+      - TRANSCRIPT_HOST=transcriptservice
+      - TRANSCRIPT_PORT=8000
+      - COMPOSE_PROJECT_DIR=${PWD}
+      - COMPOSE_FILE=/app/docker-compose.yml
+    command: celery -A tasks worker --loglevel=info --concurrency=1
     depends_on:
       - redis
-      - audioservice
-      - visualservice
     networks:
       - ai_network
     restart: unless-stopped
+    labels:
+      - "autoheal=true"
 
   audioservice:
+    profiles: [ "on-demand" ]
     image: audioservice:latest
     container_name: audioservice
     ports:
@@ -87,17 +104,16 @@ services:
               capabilities: [ gpu ]
     networks:
       - ai_network
-    restart: always
+    restart: no
     healthcheck:
       test: [ "CMD", "curl", "-f", "http://localhost:8000/health/" ]
       interval: 1m
       timeout: 30s
       retries: 3
       start_period: 5m
-    labels:
-      - autoheal=true
 
   visualservice:
+    profiles: [ "on-demand" ]
     image: narrative-api:latest
     container_name: visualservice
     deploy:
@@ -119,15 +135,38 @@ services:
       - "9001:8000"
     networks:
       - ai_network
-    restart: always
+    restart: no
     healthcheck:
       test: [ "CMD", "curl", "-f", "http://localhost:8000/health/" ]
       interval: 1m
       timeout: 30s
       retries: 3
       start_period: 5m
-    labels:
-      - autoheal=true
+
+  transcriptservice:
+    profiles: [ "on-demand" ]
+    image: ai4me-transcript:latest
+    container_name: transcriptservice
+    ports:
+      - "9003:8000"
+    volumes:
+      - ./weights/ollama:/root/.ollama/models
+      - ./shared:/shared
+    environment:
+      - OLLAMA_MODEL=llama3.2:3b
+      - SHARED_VOLUME_PATH=/shared
+      - UVICORN_WORKERS=1
+      - UVICORN_LOG_LEVEL=info
+      - MAX_TRANSCRIPT_CHARS=0
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+    restart: no
+    networks:
+      - ai_network
 
 networks:
   ai_network:
