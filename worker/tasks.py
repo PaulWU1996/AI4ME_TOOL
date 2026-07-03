@@ -145,7 +145,7 @@ def ensure_api_key(api_dir=api_key_path, admin_key=visual_api_admin_key): # chan
                 return existing_key
     else:
         print(f"[Key Manager] API key file not found. Creating new key at {key_file_path}")
-        gen_url = visual_api_url + "/generate"
+        gen_url = visual_api_url + "/api/keys/generate" #"/generate"
         headers = {
             "X-Admin-Key": admin_key,
             "Content-Type": "application/json"
