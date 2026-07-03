@@ -1,6 +1,15 @@
 FROM python:3.10-slim
 
-RUN apt-get update && apt-get install -y docker.io && rm -rf /var/lib/apt/lists/*
+# Install docker.io and curl (needed to download the binary)
+RUN apt-get update && apt-get install -y \
+    docker.io \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Download and install the docker compose plugin
+RUN mkdir -p /usr/libexec/docker/cli-plugins/ && \
+    curl -SL "https://github.com/docker/compose/releases/download/v2.24.5/docker-compose-linux-$(uname -m)" -o /usr/libexec/docker/cli-plugins/docker-compose && \
+    chmod +x /usr/libexec/docker/cli-plugins/docker-compose
 
 WORKDIR /app
 
