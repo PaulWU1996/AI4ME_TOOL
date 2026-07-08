@@ -5,16 +5,19 @@ from celery.result import AsyncResult
 from tasks import app as celery_app
 from pydantic import BaseModel
 from typing import Optional
+from datetime import datetime, timezone
 
 app = FastAPI()
 
 SUPPORTED_JOB_TYPES = ["full", "audio_only", "visual_only", "moments"]
+MAX_ETA_SECONDS = 3600 # set to visibility_timeout value
 
 class ProcessRequest(BaseModel):
     path: str
     callback_url: Optional[str] = None
     prompts: Optional[str] = None
     job_type: str = "full"
+    run_at_ms: Optional[int] = None
 
 def build_chain(request: ProcessRequest, job_id: str):
     download = download_file.si(request.path, job_id, prompts=request.prompts)
@@ -42,9 +45,23 @@ async def start_pipeline(request: ProcessRequest):
         raise HTTPException(status_code=400, detail=f"Unsupported job_type '{request.job_type}'. Choose from: {SUPPORTED_JOB_TYPES}")
 
     job_id = uuid()
+    async_kwargs = {}
+
+    if request.run_at_ms is not None:
+        run_at_seconds = request.run_at_ms / 1000.0
+        eta_dt = datetime.fromtimestamp(run_at_seconds, tz=timezone.utc)
+        now_dt = datetime.now(timezone.utc)
+        diff_seconds = (eta_dt - now_dt).total_seconds()
+        
+        if diff_seconds > MAX_ETA_SECONDS:
+            raise HTTPException(status_code=400, detail=f"run_at_ms timestamp exceeds the maximum allowed delay of {MAX_ETA_SECONDS} seconds.")
+            
+        if diff_seconds > 0:
+            print(f"[Controller] Task set to run at: {eta_dt.isoformat()}")
+            async_kwargs['eta'] = eta_dt
 
     try:
-        build_chain(request, job_id).apply_async()
+        build_chain(request, job_id).apply_async(**async_kwargs)
         return {"status": "submitted", "job_id": job_id, "job_type": request.job_type}
 
     except Exception as e:

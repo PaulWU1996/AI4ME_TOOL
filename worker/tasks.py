@@ -54,8 +54,15 @@ app.conf.update(
 )
 
 # --- Download Task ---
-@app.task(name="tasks.download_file")
-def download_file(path, job_id, prompts=None):
+@app.task(
+    name="tasks.download_file",
+    bind=True,
+    autoretry_for=(Exception,),
+    max_retries=3,
+    retry_backoff=True,
+    retry_backoff_max=60,
+)
+def download_file(self, path, job_id, prompts=None):
     output_dir = os.path.join(shared_path, job_id)
     os.makedirs(output_dir, exist_ok=True)
     try:
