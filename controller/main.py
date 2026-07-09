@@ -31,7 +31,7 @@ def build_chain(request: ProcessRequest, job_id: str):
             download | process_visual.s() | finalize
         ),
         "moments": (
-            download | process_moment.s().set(task_id=job_id)
+            download | process_moment.s() | finalize
         ),
     }
     return chains.get(request.job_type)

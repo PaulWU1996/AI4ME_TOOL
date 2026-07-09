@@ -314,6 +314,19 @@ def process_audio(payload): # change filepath to dict inputs
     return result_template
 
 
+def load_json_file(file_path):
+    try:
+        if not os.path.exists(file_path):
+            return None
+        with open(file_path, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    except json.JSONDecodeError as e:
+        print(f"[Error] Invalid JSON in {file_path}: {e}")
+        return None
+    except Exception as e:
+        print(f"[Error] Failed to read {file_path}: {e}")
+        return None
+    
 @app.task(name="tasks.finalize_results")
 def finalize_results(job_id, job_type="full", callback_url=None):
     
@@ -321,21 +334,19 @@ def finalize_results(job_id, job_type="full", callback_url=None):
 
     audio_files = glob.glob(os.path.join(workspace, "*_audio_output.json")) 
     visual_files = glob.glob(os.path.join(workspace, "*_visual_output.json"))
+    moment_files = glob.glob(os.path.join(workspace, "*_moment_output.json"))
 
-    audio_data = None
-    if audio_files:
-        with open(audio_files[0], 'r') as f:
-            audio_data = json.load(f)
+    audio_data = load_json_file(audio_files[0]) if audio_files else None
+    visual_data = load_json_file(visual_files[0]) if visual_files else None
+    moment_data = load_json_file(moment_files[0]) if moment_files else None
 
-    visual_data = None
-    if visual_files:
-        with open(visual_files[0], 'r') as f:
-            visual_data = json.load(f)
 
     if audio_files:
         video_name = os.path.basename(audio_files[0]).replace("_audio_output.json", "")
     elif visual_files:
         video_name = os.path.basename(visual_files[0]).replace("_visual_output.json", "")
+    elif moment_files:
+        video_name = os.path.basename(moment_files[0]).replace("_moment_output.json", "")
     else:
         video_name = None
 
@@ -343,6 +354,7 @@ def finalize_results(job_id, job_type="full", callback_url=None):
         "full":        audio_data is not None and visual_data is not None,
         "audio_only":  audio_data is not None,
         "visual_only": visual_data is not None,
+        "moments":     moment_data is not None,
     }.get(job_type, False)
 
     with open(os.path.join(workspace, "task_info.txt"), 'w') as f:
@@ -350,6 +362,7 @@ def finalize_results(job_id, job_type="full", callback_url=None):
         f.write(f"Video Name: {video_name}\n")
         f.write(f"Audio Files: {audio_files}\n")
         f.write(f"Visual Files: {visual_files}\n")
+        f.write(f"Moment Files: {moment_files}\n")
         f.write(f"Status: {'Success' if all_success else 'Partial/Failed'}\n")
 
     if all_success:
@@ -367,6 +380,7 @@ def finalize_results(job_id, job_type="full", callback_url=None):
         "video_name": video_name,
         "audio_result": audio_data,
         "visual_result": visual_data,
+        "moment_result": moment_data,
         "status": "success" if all_success else "partial/failed"
     }
 
@@ -379,7 +393,8 @@ def finalize_results(job_id, job_type="full", callback_url=None):
     if not all_success:
         raise RuntimeError(
             f"Pipeline incomplete — audio: {'ok' if audio_data else 'missing'}, "
-            f"visual: {'ok' if visual_data else 'missing'}"
+            f"visual: {'ok' if visual_data else 'missing'}, "
+            f"moments: {'ok' if moment_data else 'missing'}"
         )
     return final_output
 
@@ -405,8 +420,9 @@ def process_moment(payload):
         result = response.json()
         result_template.update({"success": True, "output": result})
 
-        # save_to_disk(job_id, "moment_output.json", result)
-        print(f"[Moment Worker] Success.")
+        file_name_no_ext = os.path.splitext(os.path.basename(payload.get("file_path")))[0]
+        save_to_disk(job_id, f"{file_name_no_ext}_moment_output.json", result)
+        print("[Moment Worker] Success.")
 
     except Exception as e:
         print(f"[Moment Worker] Error: {str(e)}")
