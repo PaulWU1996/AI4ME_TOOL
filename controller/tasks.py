@@ -33,6 +33,6 @@ def process_visual(payload):
 def finalize_results(job_id, callback_url=None):
     pass
 
-@app.task(name="tasks.moments")
-def process_moment(payload):
+@app.task(name="tasks.summarise")
+def process_summarise(payload):
     pass
