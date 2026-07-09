@@ -428,7 +428,7 @@ def finalize_results(job_id, job_type="full", callback_url=None):
     return final_output
 
 
-@app.task(name="tasks.summarise")
+@app.task(name="tasks.process_summarise")
 def process_summarise(payload):
     job_id = payload.get("job_id")
     result_template = {
