@@ -25,11 +25,13 @@ def build_chain(request: ProcessRequest, job_id: str):
         "tasks.download_file",
         args=[request.path, job_id],
         kwargs={"prompts": request.prompts},
+        immutable=True,
     )
     finalize = signature(
         "tasks.finalize_results",
         args=[job_id],
         kwargs={"job_type": request.job_type, "callback_url": request.callback_url},
+        immutable=True,
     ).set(task_id=job_id)
 
     chains = {
