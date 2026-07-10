@@ -105,9 +105,7 @@ def process_visual(payload):
         analyze_url = visual_api_url + "/analyze"
         # TODO: pass prompts to the service
         with open(file_path, "rb") as f:
-            response = requests.post(
-                analyze_url, headers=headers, files={"video": f}, timeout=6000
-            )
+            response = requests.post(analyze_url, headers=headers, files={"video": f}, timeout=6000)
 
         response.raise_for_status()
         visual_result = extract_flat_captions(response.text)
@@ -156,9 +154,7 @@ def process_audio(payload):  # change filepath to dict inputs
         audio_payload = {
             "video_path": f"{job_id}/{file_name}",
             "prompts": payload["prompts"],
-            "chunks": payload.get(
-                "visual_result"
-            ),  # visual segment boundaries for chunk splitting
+            "chunks": payload.get("visual_result"),  # visual segment boundaries for chunk splitting
         }
 
         response = requests.post(audio_api_url, json=audio_payload, timeout=1800)
@@ -168,9 +164,7 @@ def process_audio(payload):  # change filepath to dict inputs
                 err_detail = response.json().get("detail", response.text)
             except:
                 err_detail = response.text
-            raise Exception(
-                f"Audio Service Error ({response.status_code}): {err_detail}"
-            )
+            raise Exception(f"Audio Service Error ({response.status_code}): {err_detail}")
 
         service_data = response.json()
 
@@ -183,12 +177,8 @@ def process_audio(payload):  # change filepath to dict inputs
             }
             outputs.append(item)
 
-        result_template.update(
-            {"success": True, "output": outputs, "video_name": file_name}
-        )
-        print(
-            f"[Audio Worker] Success: Received {len(result_template['output'])} items."
-        )
+        result_template.update({"success": True, "output": outputs, "video_name": file_name})
+        print(f"[Audio Worker] Success: Received {len(result_template['output'])} items.")
 
         file_name_no_ext = os.path.splitext(file_name)[0]
         save_to_disk(job_id, f"{file_name_no_ext}_audio_output.json", outputs)
@@ -231,17 +221,13 @@ def finalize_results(job_id, job_type="full", callback_url=None):
     if audio_files:
         video_name = os.path.basename(audio_files[0]).replace("_audio_output.json", "")
     elif visual_files:
-        video_name = os.path.basename(visual_files[0]).replace(
-            "_visual_output.json", ""
-        )
+        video_name = os.path.basename(visual_files[0]).replace("_visual_output.json", "")
     elif summarise_files:
-        video_name = os.path.basename(summarise_files[0]).replace(
-            "_summarise_output.json", ""
-        )
+        video_name = os.path.basename(summarise_files[0]).replace("_summarise_output.json", "")
     else:
         video_name = None
 
-    all_success = {
+    job_success = {
         "full": audio_data is not None and visual_data is not None,
         "audio_only": audio_data is not None,
         "visual_only": visual_data is not None,
@@ -254,9 +240,9 @@ def finalize_results(job_id, job_type="full", callback_url=None):
         f.write(f"Audio Files: {audio_files}\n")
         f.write(f"Visual Files: {visual_files}\n")
         f.write(f"Summarise Files: {summarise_files}\n")
-        f.write(f"Status: {'Success' if all_success else 'Partial/Failed'}\n")
+        f.write(f"Status: {'Success' if job_success else 'Partial/Failed'}\n")
 
-    if all_success:
+    if job_success:
         # Clean up only all successful case to preserve data for debugging in failure cases
         for f in os.listdir(workspace):
             if not f.endswith(".json") and not f.endswith(".txt"):
@@ -272,7 +258,7 @@ def finalize_results(job_id, job_type="full", callback_url=None):
         "audio_result": audio_data,
         "visual_result": visual_data,
         "summarise_result": summarise_data,
-        "status": "success" if all_success else "partial/failed",  # more detailed failed
+        "status": "success" if job_success else "failed",
     }
 
     if callback_url:
@@ -282,12 +268,9 @@ def finalize_results(job_id, job_type="full", callback_url=None):
         except Exception as e:
             print(f"[Callback Warning] Failed to send callback: {str(e)}")
 
-    if not all_success:
-        raise RuntimeError(
-            f"Pipeline incomplete — audio: {'ok' if audio_data else 'missing'}, "
-            f"visual: {'ok' if visual_data else 'missing'}, "
-            f"summarise: {'ok' if summarise_data else 'missing'}"
-        )
+    if not job_success:
+        raise RuntimeError(f'{job_type} failed: {summarise_data}.')
+    
     return final_output
 
 
@@ -319,9 +302,7 @@ def process_summarise(payload):
         result = response.json()
         result_template.update({"success": True, "output": result})
 
-        file_name_no_ext = os.path.splitext(os.path.basename(payload.get("file_path")))[
-            0
-        ]
+        file_name_no_ext = os.path.splitext(os.path.basename(payload.get("file_path")))[0]
         save_to_disk(job_id, f"{file_name_no_ext}_summarise_output.json", result)
         print("[Summarise Worker] Success.")
 
