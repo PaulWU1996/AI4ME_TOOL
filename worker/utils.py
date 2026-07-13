@@ -74,9 +74,7 @@ def save_to_disk(job_id, filename, data):
         json.dump(data, f, indent=4, ensure_ascii=False)
 
 
-def ensure_api_key(
-    api_dir=api_key_path, admin_key=visual_api_admin_key
-):  # change the api_dir
+def ensure_api_key(api_dir=api_key_path, admin_key=visual_api_admin_key):  # change the api_dir
     key_file_path = os.path.join(api_dir, "api.key")
 
     if os.path.exists(key_file_path):
@@ -86,9 +84,7 @@ def ensure_api_key(
                 print(f"[Key Manager] API key already exists: {existing_key}")
                 return existing_key
     else:
-        print(
-            f"[Key Manager] API key file not found. Creating new key at {key_file_path}"
-        )
+        print(f"[Key Manager] API key file not found. Creating new key at {key_file_path}")
         gen_url = visual_api_url + "/generate"
         headers = {"X-Admin-Key": admin_key, "Content-Type": "application/json"}
         payload = {"client_name": "client_ai4me", "expire_in_days": 365}
@@ -101,9 +97,7 @@ def ensure_api_key(
             new_key = data.get("api_key")
 
             if not new_key:
-                raise ValueError(
-                    f"Failed to obtain API key from visual service: {data}"
-                )
+                raise ValueError(f"Failed to obtain API key from visual service: {data}")
             with open(key_file_path, "w") as f:
                 f.write(new_key)
             print(f"[Key Manager] Generated and saved new API key: {new_key}")
@@ -139,3 +133,26 @@ def extract_flat_captions(xml_body):
         }
         for seg in raw_segments
     ]
+
+def get_speaker_turn_boundary_ms(segments: list[dict], index: int, search_direction: str) -> int:
+    speaker = segments[index]["speaker"]
+    step = 1 if search_direction == "forward" else -1
+    i = index
+
+    while 0 <= i + step < len(segments) and segments[i + step]["speaker"] == speaker:
+        i += step
+
+    return segments[i]["endMs"] if search_direction == "forward" else segments[i]["startMs"]
+
+def load_json_file(file_path):
+    try:
+        if not os.path.exists(file_path):
+            return None
+        with open(file_path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except json.JSONDecodeError as e:
+        print(f"[Error] Invalid JSON in {file_path}: {e}")
+        return None
+    except Exception as e:
+        print(f"[Error] Failed to read {file_path}: {e}")
+        return None
