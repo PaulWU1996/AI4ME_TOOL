@@ -3,7 +3,7 @@ import shutil
 import requests
 import json
 from celery import Celery
-from urllib.parse import urlparse
+from urllib.parse import urlparse, parse_qs
 import glob
 from consts import (
     redis_host,
@@ -19,6 +19,8 @@ from utils import (
     extract_flat_captions,
     stop_service,
     save_to_disk,
+    get_speaker_turn_boundary_ms,
+    load_json_file
 )
 
 # --- Celery ---
@@ -54,9 +56,16 @@ def download_file(self, path, job_id, prompts=None):
         parsed = urlparse(path)
         filename = os.path.basename(parsed.path)
         if not os.path.splitext(filename)[1]:
-            ext = {"transcript": "txt", "audio": "wav"}.get(filename)
-            if ext:
-                filename = f"{filename}.{ext}"
+            query_params = parse_qs(parsed.query)
+            format_param = query_params.get("format", [None])[0]
+            if format_param == "json":
+                filename = f"{filename}.json"
+            elif format_param == "text":
+                filename = f"{filename}.txt"
+            else:
+                ext = {"transcript": "txt", "audio": "wav"}.get(filename)
+                if ext:
+                    filename = f"{filename}.{ext}"
         dest = os.path.join(output_dir, filename)
 
         if parsed.scheme == "s3":
@@ -191,18 +200,7 @@ def process_audio(payload):  # change filepath to dict inputs
     return result_template
 
 
-def load_json_file(file_path):
-    try:
-        if not os.path.exists(file_path):
-            return None
-        with open(file_path, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except json.JSONDecodeError as e:
-        print(f"[Error] Invalid JSON in {file_path}: {e}")
-        return None
-    except Exception as e:
-        print(f"[Error] Failed to read {file_path}: {e}")
-        return None
+
 
 
 @app.task(name="tasks.finalize_results")
@@ -213,10 +211,12 @@ def finalize_results(job_id, job_type="full", callback_url=None):
     audio_files = glob.glob(os.path.join(workspace, "*_audio_output.json"))
     visual_files = glob.glob(os.path.join(workspace, "*_visual_output.json"))
     summarise_files = glob.glob(os.path.join(workspace, "*_summarise_output.json"))
+    extent_files = glob.glob(os.path.join(workspace, "*_extent_output.json"))
 
     audio_data = load_json_file(audio_files[0]) if audio_files else None
     visual_data = load_json_file(visual_files[0]) if visual_files else None
     summarise_data = load_json_file(summarise_files[0]) if summarise_files else None
+    extent_data = load_json_file(extent_files[0]) if extent_files else None
 
     if audio_files:
         video_name = os.path.basename(audio_files[0]).replace("_audio_output.json", "")
@@ -224,6 +224,8 @@ def finalize_results(job_id, job_type="full", callback_url=None):
         video_name = os.path.basename(visual_files[0]).replace("_visual_output.json", "")
     elif summarise_files:
         video_name = os.path.basename(summarise_files[0]).replace("_summarise_output.json", "")
+    elif extent_files:
+        video_name = os.path.basename(extent_files[0]).replace("_extent_output.json", "")
     else:
         video_name = None
 
@@ -232,6 +234,8 @@ def finalize_results(job_id, job_type="full", callback_url=None):
         "audio_only": audio_data is not None,
         "visual_only": visual_data is not None,
         "summarise": summarise_data is not None,
+        "speaker-extent-summarise": extent_data is not None and summarise_data is not None,
+        "utterance-extent-summarise": extent_data is not None and summarise_data is not None,
     }.get(job_type, False)
 
     with open(os.path.join(workspace, "task_info.txt"), "w") as f:
@@ -240,6 +244,7 @@ def finalize_results(job_id, job_type="full", callback_url=None):
         f.write(f"Audio Files: {audio_files}\n")
         f.write(f"Visual Files: {visual_files}\n")
         f.write(f"Summarise Files: {summarise_files}\n")
+        f.write(f"Extent Files: {extent_files}\n")
         f.write(f"Status: {'Success' if job_success else 'Partial/Failed'}\n")
 
     if job_success:
@@ -258,6 +263,7 @@ def finalize_results(job_id, job_type="full", callback_url=None):
         "audio_result": audio_data,
         "visual_result": visual_data,
         "summarise_result": summarise_data,
+        "extent_result": extent_data,
         "status": "success" if job_success else "failed",
     }
 
@@ -269,8 +275,8 @@ def finalize_results(job_id, job_type="full", callback_url=None):
             print(f"[Callback Warning] Failed to send callback: {str(e)}")
 
     if not job_success:
-        raise RuntimeError(f'{job_type} failed: {summarise_data}.')
-    
+        raise RuntimeError(f"{job_type} failed: {summarise_data}.")
+
     return final_output
 
 
@@ -313,3 +319,92 @@ def process_summarise(payload):
         stop_service("transcriptservice")
 
     return {**payload, "summarise_result": result_template}
+
+
+@app.task(name="tasks.speaker_extent")
+def speaker_extent(payload):
+    file_path = os.path.normpath(payload["file_path"])
+    job_id = payload["job_id"]
+
+    transcript = load_json_file(file_path)
+
+    segments = transcript.get("segments", [])
+    if not segments:
+        raise ValueError("No segments found in transcript")
+
+    start_speaker_ms = get_speaker_turn_boundary_ms(segments, 0, "forward")
+    end_speaker_ms = get_speaker_turn_boundary_ms(segments, len(segments) - 1, "backward")
+
+    if start_speaker_ms > end_speaker_ms:
+        start_speaker_ms = segments[0]["startMs"]
+        end_speaker_ms = segments[len(segments) - 1]["endMs"]
+
+    transcript["segments"] = [
+        seg
+        for seg in segments
+        if seg["endMs"] > start_speaker_ms and seg["startMs"] < end_speaker_ms
+    ]
+
+    file_name = os.path.basename(file_path)
+    file_name_no_ext = os.path.splitext(file_name)[0]
+    trimmed_file_name = f"{file_name_no_ext}_trimmed.json"
+    save_to_disk(job_id, trimmed_file_name, transcript)
+
+    extent_result = {"start": start_speaker_ms, "end": end_speaker_ms}
+    save_to_disk(job_id, f"{file_name_no_ext}_extent_output.json", extent_result)
+
+    trimmed_file_path = os.path.join(os.path.dirname(file_path), trimmed_file_name)
+    print(f"[Speaker Extent] Trimmed to speaker range: {start_speaker_ms}ms - {end_speaker_ms}ms")
+    return {
+        **payload,
+        "file_path": trimmed_file_path,
+        "start": start_speaker_ms,
+        "end": end_speaker_ms,
+    }
+
+
+@app.task(name="tasks.segment_extent")
+def segment_extent(payload):
+    file_path = os.path.normpath(payload["file_path"])
+    job_id = payload["job_id"]
+
+    transcript = load_json_file(file_path)
+
+    segments = transcript.get("segments", [])
+    first = segments[0]
+    last = segments[len(segments) - 1]
+    start_ms = first.get("startMs", 0)
+    end_ms = last.get("endMs", 0)
+
+    if start_ms > end_ms:
+        start_ms = end_ms
+
+    file_name = os.path.basename(file_path)
+    file_name_no_ext = os.path.splitext(file_name)[0]
+
+    extent_result = {"start": start_ms, "end": end_ms}
+    save_to_disk(job_id, f"{file_name_no_ext}_extent_output.json", extent_result)
+
+    print(f"[Segment Extent] Extracted range: {start_ms}ms - {end_ms}ms")
+    return {**payload, "start": start_ms, "end": end_ms}
+
+
+@app.task(name="tasks.transcript_to_text")
+def transcript_to_text(payload):
+    file_path = os.path.normpath(payload["file_path"])
+
+    transcript = load_json_file(file_path)
+    segments = transcript.get("segments", [])
+
+    text = " ".join(
+        seg.get("text", "").strip() 
+        for seg in segments 
+        if seg.get("text", "").strip()
+    )
+
+    txt_path = os.path.splitext(file_path)[0] + ".txt"
+    with open(txt_path, "w", encoding="utf-8") as f:
+        f.write(text)
+
+    print(f"[Transcript to Text] Saved text to {txt_path}")
+    return {**payload, "file_path": txt_path}

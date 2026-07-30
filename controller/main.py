@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 
 app = FastAPI()
 
-SUPPORTED_JOB_TYPES = ["full", "audio_only", "visual_only", "summarise"]
+SUPPORTED_JOB_TYPES = ["full", "audio_only", "visual_only", "summarise", "speaker-extent-summarise", "utterance-extent-summarise"]
 MAX_ETA_SECONDS = 3600  # set to visibility_timeout value
 
 
@@ -27,6 +27,8 @@ def build_chain(request: ProcessRequest, job_id: str):
         kwargs={"prompts": request.prompts},
         immutable=True,
     )
+    summarise = signature("tasks.process_summarise")
+    transcript_to_text = signature("tasks.transcript_to_text")
     finalize = signature(
         "tasks.finalize_results",
         args=[job_id],
@@ -41,9 +43,35 @@ def build_chain(request: ProcessRequest, job_id: str):
             | signature("tasks.process_audio")
             | finalize
         ),
-        "audio_only": (download | signature("tasks.process_audio") | finalize),
-        "visual_only": (download | signature("tasks.process_visual") | finalize),
-        "summarise": (download | signature("tasks.process_summarise") | finalize),
+        "audio_only": (
+            download 
+            | signature("tasks.process_audio") 
+            | finalize
+        ),
+        "visual_only": (
+            download 
+            | signature("tasks.process_visual") 
+            | finalize
+        ),
+        "summarise": (
+            download 
+            | summarise 
+            | finalize
+        ),
+        "speaker-extent-summarise": (
+            download 
+            | signature("tasks.speaker_extent") 
+            | transcript_to_text 
+            | summarise 
+            | finalize
+        ),
+        "utterance-extent-summarise": (
+            download 
+            | signature("tasks.segment_extent") 
+            | transcript_to_text 
+            | summarise 
+            | finalize
+        ),
     }
     return chains.get(request.job_type)
 
