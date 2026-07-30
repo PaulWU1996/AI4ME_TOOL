@@ -76,6 +76,7 @@ services:
       - redis
     networks:
       - ai_network
+      - shared_network
     restart: unless-stopped
     labels:
       - "autoheal=true"
@@ -167,6 +168,6 @@ services:
 networks:
   ai_network:
     driver: bridge 
-  shared_network: # comment out and remove from controller if running standalone
+  shared_network: # comment out and remove from controller/worker if running standalone
     external: true
     name: moments_gateway
