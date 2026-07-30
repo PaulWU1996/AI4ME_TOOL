@@ -1,5 +1,5 @@
 from fastapi import FastAPI, HTTPException
-from tasks import download_file, process_audio, process_visual, finalize_results, process_moment
+from tasks import download_file, process_audio, process_visual, finalize_results, process_summarise
 from celery import uuid
 from celery.result import AsyncResult
 from tasks import app as celery_app
@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 
 app = FastAPI()
 
-SUPPORTED_JOB_TYPES = ["full", "audio_only", "visual_only", "moments"]
+SUPPORTED_JOB_TYPES = ["full", "audio_only", "visual_only", "summarise"]
 MAX_ETA_SECONDS = 3600 # set to visibility_timeout value
 
 class ProcessRequest(BaseModel):
@@ -33,8 +33,8 @@ def build_chain(request: ProcessRequest, job_id: str):
         "visual_only": (
             download | process_visual.s() | finalize
         ),
-        "moments": (
-            download | process_moment.s() | finalize
+        "summarise": (
+            download | process_summarise.s() | finalize
         ),
     }
     return chains.get(request.job_type)

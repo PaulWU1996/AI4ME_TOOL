@@ -41,7 +41,7 @@ A distributed media processing tool designed for BBC creative teams. It integrat
   Support for S3, HTTP/HTTPS, and local file paths  
 
 - **Multiple Job Types**  
-  Supports `full`, `audio_only`, `visual_only`, and `moments` pipelines via a single endpoint  
+  Supports `full`, `audio_only`, `visual_only`, and `summarise` pipelines via a single endpoint  
 
 - **Automated Cleanup**  
   The worker automatically deletes `/app/tmp/<job_id>` once processing is finalized to prevent disk overflow  
@@ -120,10 +120,10 @@ curl -X POST "http://localhost:9000/process" \
   -H "Content-Type: application/json" \
   -d '{"path": "/app/data/video.mp4", "job_type": "audio_only"}'
 
-# Moments (transcript analysis)
+# Summarise (transcript analysis)
 curl -X POST "http://localhost:9000/process" \
   -H "Content-Type: application/json" \
-  -d '{"path": "http://localhost:8000/49794ede-.../transcript?start=1781183300&end=1781183700", "job_type": "moments", "prompts": "summarise key moments"}'
+  -d '{"path": "http://localhost:8000/49794ede-.../transcript?start=1781183300&end=1781183700", "job_type": "summarise", "prompts": "summarise key summarise"}'
 
 # With callback and prompts
 curl -X POST "http://localhost:9000/process" \
@@ -136,7 +136,7 @@ curl -X POST "http://localhost:9000/process" \
 | Field | Type | Default | Description |
 |---|---|---|---|
 | `path` | string | required | Media source: local path, HTTP/HTTPS URL, or S3 URI |
-| `job_type` | string | `"full"` | `full` / `audio_only` / `visual_only` / `moments` |
+| `job_type` | string | `"full"` | `full` / `audio_only` / `visual_only` / `summarise` |
 | `prompts` | string | null | Custom analysis prompt passed to services |
 | `callback_url` | string | null | Webhook to POST results to on completion |
 
@@ -175,11 +175,11 @@ The pipeline uses **Celery Chains** — tasks within a job execute sequentially.
 | `full` | `download_file` → `process_visual` → `process_audio` → `finalize_results` | both audio + visual present |
 | `audio_only` | `download_file` → `process_audio` → `finalize_results` | audio present |
 | `visual_only` | `download_file` → `process_visual` → `finalize_results` | visual present |
-| `moments` | `download_file` → `process_moment` | transcript service returns result |
+| `summarise` | `download_file` → `process_summarise` | transcript service returns result |
 
 For `full`, `audio_only`, and `visual_only`, `finalize_results` runs last: it merges output JSON files from the shared volume, writes `task_info.txt`, deletes the raw video on success, and optionally POSTs to `callback_url`.
 
-For `moments`, `process_moment` is the terminal task (no finalize step). It calls `transcriptservice` with the `job_id`, which locates the downloaded file on the shared volume directly. The result is stored in Redis under `job_id` and retrievable via `/status/{job_id}`.
+For `transcript`, `process_summarise` is the terminal task. It calls `transcriptservice` with the `job_id`, which locates the downloaded file on the shared volume directly. The result is stored in Redis under `job_id` and retrievable via `/status/{job_id}`.
 
 The full workflow is demonstrated in the following diagram:
 
@@ -215,7 +215,7 @@ The full workflow is demonstrated in the following diagram:
 │     returns: {file_path, job_id, prompts}                           │
 │            │                                                        │
 │            ▼                                                        │
-│  ② process_visual  (skipped for audio_only / moments)              │
+│  ② process_visual  (skipped for audio_only / summarise)              │
 │     starts visualservice → POST /analyze (upload video)            │
 │     parses XML → flat caption segments                              │
 │     saves {name}_visual_output.json                                 │
@@ -223,16 +223,16 @@ The full workflow is demonstrated in the following diagram:
 │     returns: {file_path, job_id, prompts, visual_result}           │
 │            │                                                        │
 │            ▼                                                        │
-│  ③ process_audio  (skipped for visual_only / moments)              │
+│  ③ process_audio  (skipped for visual_only / summarise)              │
 │     starts audioservice → POST /process_audio/                     │
 │     passes visual_result as chunk boundaries                        │
 │     saves {name}_audio_output.json                                  │
 │     stops audioservice                                              │
 │            │                                                        │
 │            ▼                                                        │
-│  ② process_moment  (moments only, replaces audio + visual)         │
-│     starts transcriptservice → POST /process/                      │
-│     service locates file via job_id on shared volume               │
+│  ② process_summarise  (summarise only, replaces audio + visual)      │ 
+│     starts transcriptservice → POST /process/                       │
+│     service locates file via job_id on shared volume                │
 │     stops transcriptservice                                         │
 │     stores result in Redis under job_id  ← terminal task           │
 │            │                                                        │
@@ -260,7 +260,7 @@ The full workflow is demonstrated in the following diagram:
 │    ├── video.mp4                  (deleted on success)              │
 │    ├── video_visual_output.json   (full / visual_only)              │
 │    ├── video_audio_output.json    (full / audio_only)               │
-│    ├── moment_output.json         (moments)                         │
+│    ├── summarise_output.json      (summarise)                       │
 │    └── task_info.txt              (full / audio_only / visual_only) │
 └─────────────────────────────────────────────────────────────────────┘
 ```
