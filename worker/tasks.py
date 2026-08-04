@@ -203,6 +203,7 @@ def extract_flat_captions(xml_body):
 
 @app.task(name="tasks.process_visual")
 def process_visual(payload):
+    # print(f"[Visual Worker] Received payload: {payload}")
     # file_path: /app/tmp/{task_id}/{filename}
     file_path = os.path.normpath(payload["file_path"])
     job_id = payload["job_id"]
@@ -219,6 +220,14 @@ def process_visual(payload):
 
         if not os.path.exists(file_path):
             raise FileNotFoundError(f"File not found: {file_path}")
+        custom_prompt = payload.get("prompts") or ""
+        if not isinstance(custom_prompt, str):
+            custom_prompt = json.dumps(custom_prompt, ensure_ascii=False)
+        custom_prompt = custom_prompt.strip()
+
+
+
+
 
         headers = {"X-API-Key": api_key}
         analyze_url = visual_api_url + "/analyze"
@@ -228,6 +237,7 @@ def process_visual(payload):
                 analyze_url,
                 headers=headers,
                 files={'video': f},
+                data={'prompt': custom_prompt},
                 timeout=6000
             )
 
@@ -265,7 +275,17 @@ def process_audio(payload): # change filepath to dict inputs
     start_service("audioservice", max_retries=1)
     try:
         print(f"[Audio Worker] Starting Task: {file_path}")
-        
+
+        # Copy this file to parent directory to avoid potential access conflict with visual task
+        # Get directory one up in the hierarchy.
+        file_name_no_ext = os.path.splitext(file_name)[0]
+        visual_result_file = f"{file_name_no_ext}_visual_output.json"
+        parent_dir = os.path.dirname(os.path.dirname(file_path))
+        parent_file_path = os.path.join(parent_dir, f"{visual_result_file}")
+        current_file_path = os.path.join(os.path.dirname(file_path), f"{visual_result_file}")
+        shutil.copy(current_file_path, parent_file_path)
+
+
         if not os.path.exists(file_path):
             raise FileNotFoundError(f"Physical file check failed: {file_path}")
 
@@ -311,6 +331,8 @@ def process_audio(payload): # change filepath to dict inputs
         result_template["error"] = str(e)
     finally:
         stop_service("audioservice")
+        # Move the file back from the parent directory
+        shutil.move(parent_file_path, current_file_path)
     return result_template
 
 
