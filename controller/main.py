@@ -55,6 +55,7 @@ def build_chain(request: ProcessRequest, job_id: str):
         ),
         "summarise": (
             download 
+            | transcript_to_text
             | summarise 
             | finalize
         ),
