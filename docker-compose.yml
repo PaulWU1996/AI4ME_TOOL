@@ -65,8 +65,8 @@ services:
       - AUDIO_PORT=8000
       - VISUAL_HOST=visualservice
       - VISUAL_PORT=8000
-      - TRANSCRIPT_HOST=transcriptservice
-      - TRANSCRIPT_PORT=8000
+      - SUMMARISE_HOST=transcriptservice
+      - SUMMARISE_PORT=8000
       - TAGGING_HOST=taggingservice
       - TAGGING_PORT=8000
       - SHARED_PATH=/app/tmp

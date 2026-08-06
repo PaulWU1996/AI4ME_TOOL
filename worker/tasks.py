@@ -237,10 +237,10 @@ def finalize_results(job_id, job_type="full", callback_url=None):
         "full": audio_data is not None and visual_data is not None,
         "audio_only": audio_data is not None,
         "visual_only": visual_data is not None,
-        "summarise": summarise_data is not None,
-        "speaker-extent-summarise": extent_data is not None and summarise_data is not None,
-        "utterance-extent-summarise": extent_data is not None and summarise_data is not None,
-        "tags": tagging_data is not None,
+        "summarise": summarise_data is not None and tagging_data is not None,
+        "speaker-extent-summarise": extent_data is not None and summarise_data is not None and tagging_data is not None,
+        "utterance-extent-summarise": extent_data is not None and summarise_data is not None and tagging_data is not None,
+        "tagging": tagging_data is not None,
     }.get(job_type, False)
 
     with open(os.path.join(workspace, "task_info.txt"), "w") as f:
@@ -286,21 +286,6 @@ def finalize_results(job_id, job_type="full", callback_url=None):
 
     return final_output
 
-
-
-def fetch_script_result(payload: dict, api_url: str = summarise_api_url):
-    """Callback function that handles the HTTP request to the service API."""
-    response = requests.post(
-        api_url,
-        json={
-            "job_id": payload.get("job_id"),
-            "job_type": "script",
-            "prompts": payload.get("prompts"),
-        },
-        timeout=1800,
-    )
-    response.raise_for_status()
-    return response.json()
 
 
 def run_script_task(
@@ -467,7 +452,5 @@ def transcript_to_text(payload):
     with open(txt_path, "w", encoding="utf-8") as f:
         f.write(text)
 
-    # ensure this is saved 
-    
     print(f"[Transcript to Text] Saved text to {txt_path}")
     return {**payload, "file_path": txt_path}

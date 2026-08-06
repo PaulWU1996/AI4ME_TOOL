@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 
 app = FastAPI()
 
-SUPPORTED_JOB_TYPES = ["full", "audio_only", "visual_only", "summarise", "speaker-extent-summarise", "utterance-extent-summarise", "tags"]
+SUPPORTED_JOB_TYPES = ["full", "audio_only", "visual_only", "summarise", "speaker-extent-summarise", "utterance-extent-summarise", "tagging"]
 MAX_ETA_SECONDS = 3600  # set to visibility_timeout value
 
 
