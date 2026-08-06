@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 
 app = FastAPI()
 
-SUPPORTED_JOB_TYPES = ["full", "audio_only", "visual_only", "summarise", "speaker-extent-summarise", "utterance-extent-summarise"]
+SUPPORTED_JOB_TYPES = ["full", "audio_only", "visual_only", "summarise", "speaker-extent-summarise", "utterance-extent-summarise", "tags"]
 MAX_ETA_SECONDS = 3600  # set to visibility_timeout value
 
 
@@ -28,6 +28,7 @@ def build_chain(request: ProcessRequest, job_id: str):
         immutable=True,
     )
     summarise = signature("tasks.process_summarise")
+    tagging = signature("tasks.process_tags")
     transcript_to_text = signature("tasks.transcript_to_text")
     finalize = signature(
         "tasks.finalize_results",
@@ -57,6 +58,7 @@ def build_chain(request: ProcessRequest, job_id: str):
             download 
             | transcript_to_text
             | summarise 
+            | tagging
             | finalize
         ),
         "speaker-extent-summarise": (
@@ -64,6 +66,7 @@ def build_chain(request: ProcessRequest, job_id: str):
             | signature("tasks.speaker_extent") 
             | transcript_to_text 
             | summarise 
+            | tagging
             | finalize
         ),
         "utterance-extent-summarise": (
@@ -71,6 +74,13 @@ def build_chain(request: ProcessRequest, job_id: str):
             | signature("tasks.segment_extent") 
             | transcript_to_text 
             | summarise 
+            | tagging
+            | finalize
+        ),
+        "tagging": (
+            download 
+            | transcript_to_text 
+            | tagging 
             | finalize
         ),
     }
