@@ -288,7 +288,7 @@ def finalize_results(job_id, job_type="full", callback_url=None):
 
 
 
-def run_script_task(
+def run_service_task(
     payload: dict,
     task_type: str,
     service_name: str,
@@ -343,7 +343,7 @@ def run_script_task(
 
 @app.task(name="tasks.process_summarise")
 def process_summarise(payload):
-    return run_script_task(
+    return run_service_task(
         payload=payload,
         task_type="summarise",
         service_name="transcriptservice",
@@ -356,7 +356,7 @@ def process_summarise(payload):
 
 @app.task(name="tasks.process_tags")
 def process_tagging(payload):
-    return run_script_task(
+    return run_service_task(
         payload=payload,
         task_type="tags",
         service_name="taggingservice",
