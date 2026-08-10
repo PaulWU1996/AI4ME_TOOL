@@ -5,3 +5,4 @@
 weights
 shared
 venv
+.env
