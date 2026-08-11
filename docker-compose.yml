@@ -27,6 +27,7 @@ services:
 
   controller:
     build: ./controller
+    image: ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPO}:controller
     container_name: controller
     ports:
       - "9000:9000"
@@ -48,6 +49,7 @@ services:
 
   worker:
     build: ./worker
+    image: ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPO}:worker
     container_name: worker
     volumes:
       - ./shared:/app/tmp
@@ -145,7 +147,7 @@ services:
 
   transcriptservice:
     profiles: [ "on-demand" ]
-    image: ai4me-transcript:latest
+    image: ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/ai4me/summarise:summarise
     container_name: transcriptservice
     ports:
       - "9003:8000"
@@ -170,7 +172,7 @@ services:
 
   taggingservice:
     profiles: [ "on-demand" ]
-    image: ai4me-tagging:latest
+    image: ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/ai4me/tagger:tagger
     container_name: taggingservice
     ports:
       - "9004:8000"

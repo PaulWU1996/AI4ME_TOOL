@@ -66,7 +66,8 @@ push_image() {
   image="$(ecr_registry)/$ECR_REPO:$tag"
 
   echo "Building image ${image}..."
-  docker build "$@" -t "$image" -f "$DOCKERFILE" "$BUILD_CONTEXT"
+  docker build --platform linux/amd64 "$@" -t "$image" -f "$DOCKERFILE" "$BUILD_CONTEXT"
+
 
   echo "Pushing ${image}"
   docker push "$image"
