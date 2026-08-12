@@ -199,10 +199,6 @@ def process_audio(payload):  # change filepath to dict inputs
         stop_service("audioservice")
     return result_template
 
-
-
-
-
 @app.task(name="tasks.finalize_results")
 def finalize_results(job_id, job_type="full", callback_url=None):
 
