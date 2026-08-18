@@ -1,0 +1,23 @@
+{
+  "audioservice": {
+    "compose_service": "audioservice",
+    "vram_mb": 8000,
+    "ram_mb": 4000,
+    "gpu": true,
+    "supports_keepalive": true
+  },
+  "visualservice": {
+    "compose_service": "visualservice",
+    "vram_mb": 6000,
+    "ram_mb": 4000,
+    "gpu": true,
+    "supports_keepalive": true
+  },
+  "transcriptservice": {
+    "compose_service": "transcriptservice",
+    "vram_mb": 0,
+    "ram_mb": 2000,
+    "gpu": false,
+    "supports_keepalive": true
+  }
+}

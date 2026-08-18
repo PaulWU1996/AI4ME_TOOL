@@ -89,17 +89,45 @@ docker load -i narrative-api.tar
 docker load -i transcriptservice.tar
 ```
 
-4. Start the entire stack using Docker Compose:
+4. Start the entire stack using the resource-aware start script:
 ```bash
-docker-compose up --build
+# All on-demand services cold-start per job (default, historical behavior)
+./scripts/start.sh
+
+# Keep specific GPU services resident across jobs (see "Service Modes" below)
+./scripts/start.sh --keepalive audioservice,transcriptservice
 ```
-There will be several services starting up, including Redis, the Controller API, and the Worker. The audio, visual, and transcript services start on-demand when a job requires them. The Controller and Worker will connect to Redis for task orchestration.
+There will be several services starting up, including Redis, the Controller API, and the Worker. Services not selected with `--keepalive` start on-demand when a job requires them and stop afterward. The Controller and Worker will connect to Redis for task orchestration.
 
 Once compose completed, the TOOL API will be available at:
 
 ```
 http://localhost:9000
 ```
+
+---
+
+### Service Modes: Cold-start vs Keepalive
+
+By default, `audioservice`, `visualservice`, and `transcriptservice` are **cold-started**: the worker starts each container only when a job needs it and stops it again once the job finishes. This keeps host resource usage minimal but pays a model-load/health-check cost (up to ~5.5 minutes) on every single job.
+
+If your host has enough spare GPU/RAM capacity, you can instead keep one or more of these services **resident** across jobs ("keepalive"), avoiding the per-job startup cost.
+
+```bash
+# Keep audioservice and transcriptservice running; visualservice still cold-starts per job
+./scripts/start.sh --keepalive audioservice,transcriptservice
+```
+
+How it works (`scripts/start_services.py`, invoked by `scripts/start.sh`):
+
+1. **Registry** — `config/services.json` declares each on-demand service's estimated `vram_mb`/`ram_mb` and whether it supports keepalive. Add a new on-demand service by adding one entry here.
+2. **Static pre-check** — before touching Docker, sums the declared resource estimates for your `--keepalive` selection and compares against detected host GPU/RAM capacity (`nvidia-smi`, `free -m`). If the selection is obviously too large, the script aborts immediately with no containers started.
+3. **Measured pass** — starts each keepalive-selected service one at a time, waits for it to become healthy, and measures its *actual* VRAM delta. If real cumulative usage would exceed a safety margin of host capacity, the script stops what it started and aborts, reporting the real numbers. On success, the measured values are written back into `config/services.json` so future runs use observed reality instead of stale estimates.
+4. The resolved mode selection is written to `shared/service_modes.json`. The worker reads this file once at startup — `start_service`/`stop_service` skip the start/stop cycle for any service marked `keepalive`, and automatically fall back to normal cold-start recovery if a keepalive container isn't actually healthy when a job needs it.
+
+Services omitted from `--keepalive` default to `coldstart` (today's default behavior).
+
+**Note:** `scripts/start_services.py` runs on the host (not inside a container) — it needs `docker`, the `docker` Python package, and (for GPU services) `nvidia-smi` available on the host running `docker compose`.
 
 ---
 

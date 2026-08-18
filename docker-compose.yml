@@ -75,6 +75,7 @@ services:
       - ADMIN_KEY=${AI4ME_ADMIN_PASSWORD}
       - COMPOSE_PROJECT_DIR=${PWD}
       - COMPOSE_FILE=/app/docker-compose.yml
+      - SERVICE_MODES_PATH=/app/tmp/service_modes.json
     command: celery -A tasks worker --loglevel=info --concurrency=1
     depends_on:
       - redis
