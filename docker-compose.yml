@@ -61,6 +61,9 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock
       - ./docker-compose.yml:/app/docker-compose.yml:ro
     environment:
+      - AWS_ACCOUNT_ID=${AWS_ACCOUNT_ID}
+      - AWS_REGION=${AWS_REGION}
+      - ECR_REPO=${ECR_REPO}
       - REDIS_HOST=redis
       - REDIS_PORT=6379
       - AUDIO_HOST=audioservice
@@ -169,6 +172,13 @@ services:
     restart: no
     networks:
       - ai_network
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [ gpu ]
 
   taggingservice:
     profiles: [ "on-demand" ]
@@ -194,10 +204,17 @@ services:
     restart: no
     networks:
       - ai_network
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [ gpu ]
       
 networks:
   ai_network:
     driver: bridge 
-  shared_network: # comment out and remove from controller/worker if running standalone
+  shared_network:
     external: true
     name: moments_gateway
