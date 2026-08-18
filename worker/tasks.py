@@ -12,6 +12,7 @@ from consts import (
     audio_api_url,
     summarise_api_url,
     tagging_api_url,
+    transcript_text_file,
 )
 from utils import (
     start_service,
@@ -438,6 +439,7 @@ def segment_extent(payload):
 @app.task(name="tasks.transcript_to_text")
 def transcript_to_text(payload):
     file_path = os.path.normpath(payload["file_path"])
+    job_id = payload["job_id"]
 
     transcript = load_json_file(file_path)
     segments = transcript.get("segments", [])
@@ -448,9 +450,8 @@ def transcript_to_text(payload):
         if seg.get("text", "").strip()
     )
 
-    txt_path = os.path.splitext(file_path)[0] + ".txt"
-    with open(txt_path, "w", encoding="utf-8") as f:
-        f.write(text)
+    save_to_disk(job_id, transcript_text_file, text)
 
+    txt_path = os.path.join(os.path.dirname(file_path), transcript_text_file)
     print(f"[Transcript to Text] Saved text to {txt_path}")
     return {**payload, "file_path": txt_path}

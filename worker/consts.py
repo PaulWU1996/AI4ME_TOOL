@@ -28,5 +28,7 @@ compose_file = os.getenv("COMPOSE_FILE", "/app/docker-compose.yml")
 project_dir = os.getenv("COMPOSE_PROJECT_DIR")
 service_modes_path = os.getenv("SERVICE_MODES_PATH", "/app/tmp/service_modes.json")
 
+transcript_text_file = "transcript.txt"
+
 HEALTH_CHECK_TIMEOUT = 330
 HEALTH_CHECK_INTERVAL = 60
