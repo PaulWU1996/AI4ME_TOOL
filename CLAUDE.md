@@ -14,11 +14,8 @@ AI4ME_PROJ is a containerized media processing pipeline that runs parallel audio
 docker load -i audioservice.tar
 docker load -i narrative-api.tar
 
-# Build and run all services (all on-demand services cold-start per job, default)
-./scripts/start.sh
-
-# Keep specific GPU services resident across jobs (see "Service Modes" below)
-./scripts/start.sh --keepalive audioservice,transcriptservice
+# Build and run all services
+docker-compose up --build
 ```
 
 ### Rebuild a single service after code changes
@@ -86,8 +83,7 @@ GET /status/{job_id} returns results (or callback_url receives them)
 
 - **`download_file` lives in the worker** (not controller) so the downloaded file lands on the shared volume accessible to the analysis tasks.
 - **Audio and visual tasks run in parallel** via a Celery chord; `finalize_results` is the chord callback and runs only after both complete.
-- **On-demand containers:** the worker dynamically starts/stops on-demand services (`audioservice`, `visualservice`, `transcriptservice`) via the Docker Python SDK using the host Docker socket (`/var/run/docker.sock`). Health checks poll for 330s before timing out.
-- **Service modes (cold-start vs keepalive):** `scripts/start.sh` (see "Service Modes" below) resolves, per service, whether it cold-starts per job (default, historical behavior) or stays resident ("keepalive") across jobs. The resolved selection is written to `shared/service_modes.json`, which `worker/utils.py` reads once at import — `start_service`/`stop_service` skip the start/stop cycle for any service marked `keepalive`, falling back to normal cold-start recovery if a keepalive container isn't actually healthy.
+- **On-demand containers:** the worker dynamically starts/stops `audioservice` and `visualservice` via the Docker Python SDK using the host Docker socket (`/var/run/docker.sock`). Health checks poll for 330s before timing out.
 - **Task reliability settings** in both `controller/main.py` and `worker/tasks.py`: `task_acks_late=True`, `task_reject_on_worker_lost=True`, prefetch=1, visibility timeout=1h. These are required for long-running GPU workloads.
 - **Workspace per job:** each job gets `/app/tmp/{job_id}/` on the shared volume. On success, the raw video is deleted; JSON outputs and `task_info.txt` are retained.
 
@@ -109,18 +105,6 @@ GET /status/{job_id} returns results (or callback_url receives them)
 - `ADMIN_KEY` — visual service admin password (for API key bootstrap)
 - `API_KEY_PATH` — path where the visual API key is cached
 - `COMPOSE_PROJECT_DIR`, `COMPOSE_FILE` — docker-compose context for `_compose()` helper
-- `SERVICE_MODES_PATH` — path to the resolved cold-start/keepalive selection written by `scripts/start.sh` (default `/app/tmp/service_modes.json`)
-
-## Service Modes
-
-`scripts/start_services.py` (invoked via `./scripts/start.sh`) decides, per on-demand service, whether it cold-starts per job or stays resident ("keepalive") across jobs:
-
-1. **Registry** (`config/services.json`) declares each service's estimated `vram_mb`/`ram_mb` and whether it supports keepalive. Adding a new on-demand service = one new entry here.
-2. **Static pre-check**: sums declared resource estimates for the `--keepalive` selection against host GPU/RAM capacity (`nvidia-smi`, `free -m`); aborts immediately with no containers touched if it's obviously too much.
-3. **Measured pass**: starts each keepalive-selected service one at a time, measures its *actual* VRAM delta, and aborts (stopping what it started) if real cumulative usage exceeds a safety margin of host capacity. Successful runs write the measured deltas back into `config/services.json`, so the registry self-calibrates instead of relying on stale estimates.
-4. The resolved mode selection is written to `shared/service_modes.json`, which the worker reads to skip start/stop cycling for keepalive services (falling back to normal cold-start recovery if a keepalive container isn't actually healthy).
-
-Services not passed to `--keepalive` default to `coldstart` (today's behavior — started/stopped per job).
 
 ## Code Layout
 

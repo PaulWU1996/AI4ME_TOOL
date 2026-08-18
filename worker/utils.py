@@ -5,12 +5,10 @@ import xmltodict
 import json
 import subprocess
 import docker
-import docker.errors
 
 from consts import (
     compose_file,
     project_dir,
-    service_modes_path,
     HEALTH_CHECK_TIMEOUT,
     HEALTH_CHECK_INTERVAL,
     api_key_path,
@@ -24,22 +22,6 @@ docker_client = docker.from_env()
 
 
 # --- Service Container Management ---
-def load_service_modes():
-    """Reads the mode selection written by scripts/start_services.py.
-
-    Missing file or missing entries default to "coldstart" (today's start/stop-per-job
-    behavior), so keepalive is strictly opt-in via the start script.
-    """
-    try:
-        with open(service_modes_path) as f:
-            return json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError):
-        return {}
-
-
-service_modes = load_service_modes()
-
-
 def _compose(service_name, *args):
     cmd = ["docker", "compose", "-f", compose_file]
     if project_dir:
@@ -49,17 +31,6 @@ def _compose(service_name, *args):
 
 
 def start_service(service_name, max_retries=1):
-    if service_modes.get(service_name) == "keepalive":
-        try:
-            container = docker_client.containers.get(service_name)
-            container.reload()
-            health = container.attrs.get("State", {}).get("Health", {}).get("Status")
-            if health == "healthy":
-                return
-        except docker.errors.NotFound:
-            pass
-        print(f"[Service Manager] {service_name} is in keepalive mode but not healthy; falling back to cold-start recovery.")
-
     for attempt in range(max_retries + 1):
         if attempt == 0:
             _compose(service_name, "up", "-d")
@@ -91,9 +62,6 @@ def start_service(service_name, max_retries=1):
 
 
 def stop_service(service_name):
-    if service_modes.get(service_name) == "keepalive":
-        print(f"[Service Manager] Keepalive mode: leaving {service_name} running")
-        return
     print(f"[Service Manager] Stopping {service_name}")
     _compose(service_name, "stop")
 
