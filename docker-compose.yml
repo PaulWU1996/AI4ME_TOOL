@@ -27,6 +27,7 @@ services:
 
   controller:
     build: ./controller
+    image: ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPO}:controller
     container_name: controller
     ports:
       - "9000:9000"
@@ -48,6 +49,7 @@ services:
 
   worker:
     build: ./worker
+    image: ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPO}:worker
     container_name: worker
     volumes:
       - ./shared:/app/tmp
@@ -59,14 +61,19 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock
       - ./docker-compose.yml:/app/docker-compose.yml:ro
     environment:
+      - AWS_ACCOUNT_ID=${AWS_ACCOUNT_ID}
+      - AWS_REGION=${AWS_REGION}
+      - ECR_REPO=${ECR_REPO}
       - REDIS_HOST=redis
       - REDIS_PORT=6379
       - AUDIO_HOST=audioservice
       - AUDIO_PORT=8000
       - VISUAL_HOST=visualservice
       - VISUAL_PORT=8000
-      - TRANSCRIPT_HOST=transcriptservice
-      - TRANSCRIPT_PORT=8000
+      - SUMMARISE_HOST=transcriptservice
+      - SUMMARISE_PORT=8000
+      - TAGGING_HOST=taggingservice
+      - TAGGING_PORT=8000
       - SHARED_PATH=/app/tmp
       - ADMIN_KEY=${AI4ME_ADMIN_PASSWORD}
       - COMPOSE_PROJECT_DIR=${PWD}
@@ -143,7 +150,7 @@ services:
 
   transcriptservice:
     profiles: [ "on-demand" ]
-    image: ai4me-transcript:latest
+    image: ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/ai4me/summarise:summarise
     container_name: transcriptservice
     ports:
       - "9003:8000"
@@ -165,10 +172,49 @@ services:
     restart: no
     networks:
       - ai_network
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [ gpu ]
 
+  taggingservice:
+    profiles: [ "on-demand" ]
+    image: ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/ai4me/tagger:tagger
+    container_name: taggingservice
+    ports:
+      - "9004:8000"
+    volumes:
+      - ./weights/ollama:/root/.ollama/models
+      - ./shared:/shared
+    environment:
+      - OLLAMA_MODEL=llama3.2:3b
+      - SHARED_VOLUME_PATH=/shared
+      - UVICORN_WORKERS=1
+      - UVICORN_LOG_LEVEL=info
+      - MAX_TRANSCRIPT_CHARS=0
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+    restart: no
+    networks:
+      - ai_network
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [ gpu ]
+      
 networks:
   ai_network:
     driver: bridge 
-  shared_network: # comment out and remove from controller/worker if running standalone
+  shared_network:
     external: true
     name: moments_gateway

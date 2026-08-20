@@ -1,0 +1,6 @@
+{
+  "transcriptservice": "keepalive",
+  "taggingservice": "keepalive",
+  "audioservice": "coldstart",
+  "visualservice": "coldstart"
+}

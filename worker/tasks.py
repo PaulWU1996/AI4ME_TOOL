@@ -1,7 +1,6 @@
 import os
 import shutil
 import requests
-import json
 from celery import Celery
 from urllib.parse import urlparse, parse_qs
 import glob
@@ -11,7 +10,9 @@ from consts import (
     shared_path,
     visual_api_url,
     audio_api_url,
-    transcript_api_url,
+    summarise_api_url,
+    tagging_api_url,
+    transcript_text_file,
 )
 from utils import (
     start_service,
@@ -208,39 +209,45 @@ def finalize_results(job_id, job_type="full", callback_url=None):
     visual_files = glob.glob(os.path.join(workspace, "*_visual_output.json"))
     summarise_files = glob.glob(os.path.join(workspace, "*_summarise_output.json"))
     extent_files = glob.glob(os.path.join(workspace, "*_extent_output.json"))
+    tagging_files = glob.glob(os.path.join(workspace, "*_tagging_output.json"))
 
     audio_data = load_json_file(audio_files[0]) if audio_files else None
     visual_data = load_json_file(visual_files[0]) if visual_files else None
     summarise_data = load_json_file(summarise_files[0]) if summarise_files else None
     extent_data = load_json_file(extent_files[0]) if extent_files else None
+    tagging_data = load_json_file(tagging_files[0]) if tagging_files else None
 
     if audio_files:
-        video_name = os.path.basename(audio_files[0]).replace("_audio_output.json", "")
+        file_name = os.path.basename(audio_files[0]).replace("_audio_output.json", "")
     elif visual_files:
-        video_name = os.path.basename(visual_files[0]).replace("_visual_output.json", "")
+        file_name = os.path.basename(visual_files[0]).replace("_visual_output.json", "")
     elif summarise_files:
-        video_name = os.path.basename(summarise_files[0]).replace("_summarise_output.json", "")
+        file_name = os.path.basename(summarise_files[0]).replace("_summarise_output.json", "")
     elif extent_files:
-        video_name = os.path.basename(extent_files[0]).replace("_extent_output.json", "")
+        file_name = os.path.basename(extent_files[0]).replace("_extent_output.json", "")
+    elif tagging_files:
+        file_name = os.path.basename(tagging_files[0]).replace("_tagging_output.json", "")
     else:
-        video_name = None
+        file_name = None
 
     job_success = {
         "full": audio_data is not None and visual_data is not None,
         "audio_only": audio_data is not None,
         "visual_only": visual_data is not None,
-        "summarise": summarise_data is not None,
-        "speaker-extent-summarise": extent_data is not None and summarise_data is not None,
-        "utterance-extent-summarise": extent_data is not None and summarise_data is not None,
+        "summarise": summarise_data is not None and tagging_data is not None,
+        "speaker-extent-summarise": extent_data is not None and summarise_data is not None and tagging_data is not None,
+        "utterance-extent-summarise": extent_data is not None and summarise_data is not None and tagging_data is not None,
+        "tagging": tagging_data is not None,
     }.get(job_type, False)
 
     with open(os.path.join(workspace, "task_info.txt"), "w") as f:
         f.write(f"Job ID: {job_id}\n")
-        f.write(f"Video Name: {video_name}\n")
+        f.write(f"Video Name: {file_name}\n")
         f.write(f"Audio Files: {audio_files}\n")
         f.write(f"Visual Files: {visual_files}\n")
         f.write(f"Summarise Files: {summarise_files}\n")
         f.write(f"Extent Files: {extent_files}\n")
+        f.write(f"Tagging Files: {tagging_files}\n")
         f.write(f"Status: {'Success' if job_success else 'Partial/Failed'}\n")
 
     if job_success:
@@ -255,11 +262,12 @@ def finalize_results(job_id, job_type="full", callback_url=None):
 
     final_output = {
         "job_id": job_id,
-        "video_name": video_name,
+        "video_name": file_name,
         "audio_result": audio_data,
         "visual_result": visual_data,
         "summarise_result": summarise_data,
         "extent_result": extent_data,
+        "tagging_result": tagging_data,
         "status": "success" if job_success else "failed",
     }
 
@@ -276,22 +284,34 @@ def finalize_results(job_id, job_type="full", callback_url=None):
     return final_output
 
 
-@app.task(name="tasks.process_summarise")
-def process_summarise(payload):
+
+def run_service_task(
+    payload: dict,
+    task_type: str,
+    service_name: str,
+    log_tag: str,
+    file_suffix: str,
+    result_key: str,
+    api_url: str,
+) -> dict:
+    """Helper function to execute script processing tasks with shared service
+
+    management, HTTP requesting, and output saving.
+    """
     job_id = payload.get("job_id")
     result_template = {
-        "type": "summarise",
+        "type": task_type,
         "success": False,
         "output": None,
         "error": None,
     }
 
     try:
-        start_service("transcriptservice", max_retries=1)
-        print(f"[Summarise Worker] Starting Task: {job_id}")
+        start_service(service_name, max_retries=1)
+        print(f"{log_tag} Starting Task: {job_id}")
 
         response = requests.post(
-            transcript_api_url,
+            api_url,
             json={
                 "job_id": job_id,
                 "job_type": "script",
@@ -304,17 +324,44 @@ def process_summarise(payload):
         result = response.json()
         result_template.update({"success": True, "output": result})
 
-        file_name_no_ext = os.path.splitext(os.path.basename(payload.get("file_path")))[0]
-        save_to_disk(job_id, f"{file_name_no_ext}_summarise_output.json", result)
-        print("[Summarise Worker] Success.")
+        file_path = payload.get("file_path", "")
+        file_name_no_ext = os.path.splitext(os.path.basename(file_path))[0]
+        save_to_disk(job_id, f"{file_name_no_ext}_{file_suffix}.json", result)
+        print(f"{log_tag} Success.")
 
     except Exception as e:
-        print(f"[Summarise Worker] Error: {str(e)}")
+        print(f"{log_tag} Error: {str(e)}")
         result_template["error"] = str(e)
     finally:
-        stop_service("transcriptservice")
+        stop_service(service_name)
 
-    return {**payload, "summarise_result": result_template}
+    return {**payload, result_key: result_template}
+
+
+@app.task(name="tasks.process_summarise")
+def process_summarise(payload):
+    return run_service_task(
+        payload=payload,
+        task_type="summarise",
+        service_name="transcriptservice",
+        log_tag="[Summarise Worker]",
+        file_suffix="summarise_output",
+        result_key="summarise_result",
+        api_url=summarise_api_url
+    )
+
+
+@app.task(name="tasks.process_tags")
+def process_tagging(payload):
+    return run_service_task(
+        payload=payload,
+        task_type="tags",
+        service_name="taggingservice",
+        log_tag="[Tagging Worker]",
+        file_suffix="tagging_output",
+        result_key="tagging_result",
+        api_url=tagging_api_url
+    )
 
 
 @app.task(name="tasks.speaker_extent")
@@ -388,6 +435,7 @@ def segment_extent(payload):
 @app.task(name="tasks.transcript_to_text")
 def transcript_to_text(payload):
     file_path = os.path.normpath(payload["file_path"])
+    job_id = payload["job_id"]
 
     transcript = load_json_file(file_path)
     segments = transcript.get("segments", [])
@@ -398,9 +446,8 @@ def transcript_to_text(payload):
         if seg.get("text", "").strip()
     )
 
-    txt_path = os.path.splitext(file_path)[0] + ".txt"
-    with open(txt_path, "w", encoding="utf-8") as f:
-        f.write(text)
+    save_to_disk(job_id, transcript_text_file, text)
 
+    txt_path = os.path.join(os.path.dirname(file_path), transcript_text_file)
     print(f"[Transcript to Text] Saved text to {txt_path}")
     return {**payload, "file_path": txt_path}
