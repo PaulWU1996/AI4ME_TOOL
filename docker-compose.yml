@@ -149,7 +149,7 @@ services:
       start_period: 5m
 
   transcriptservice:
-    profiles: [ "on-demand" ]
+    profiles: [ "on-demand", "llm" ]
     image: ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/ai4me/summarise:summarise
     container_name: transcriptservice
     ports:
@@ -181,7 +181,7 @@ services:
               capabilities: [ gpu ]
 
   taggingservice:
-    profiles: [ "on-demand" ]
+    profiles: [ "on-demand", "llm" ]
     image: ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/ai4me/tagger:tagger
     container_name: taggingservice
     ports:
