@@ -19,5 +19,12 @@
     "ram_mb": 2000,
     "gpu": false,
     "supports_keepalive": true
+  },
+  "taggingservice": {
+    "compose_service": "taggingservice",
+    "vram_mb": 0,
+    "ram_mb": 2000,
+    "gpu": false,
+    "supports_keepalive": true
   }
 }
