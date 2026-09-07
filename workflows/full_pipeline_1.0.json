@@ -1,0 +1,38 @@
+{
+    "workflow": {
+        "name": "full_pipeline",
+        "version": "1.0"
+    },
+    "settings": {
+        "on_failure": "stop"
+    },
+    "tasks": [
+        {
+            "id": "download",
+            "task": "download_file",
+            "depends_on": []
+        },
+        {
+            "id": "visual",
+            "task": "process_visual",
+            "depends_on": [
+                "download"
+            ]
+        },
+        {
+            "id": "audio",
+            "task": "process_audio",
+            "depends_on": [
+                "visual"
+            ]
+        },
+        {
+            "id": "final",
+            "task": "finalize_results",
+            "depends_on": [
+                "visual",
+                "audio"
+            ]
+        }
+    ]
+}

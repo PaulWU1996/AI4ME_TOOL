@@ -455,3 +455,32 @@ def transcript_to_text(payload):
     txt_path = os.path.join(os.path.dirname(file_path), transcript_text_file)
     print(f"[Transcript to Text] Saved text to {txt_path}")
     return {**payload, "file_path": txt_path}
+
+
+@app.task(name="tasks.execute_workflow", bind=True)
+def execute_workflow(self, workflow_path, job_id, path, prompts=None, job_type="full", callback_url=None):
+    """Entry point for DAG-based jobs: parses a workflow JSON template into
+    a DAG and runs it as a single Celery job, feeding this request's
+    `path`/`prompts` into the DAG as runtime input (job_inputs) rather than
+    baking them into the template.
+    """
+    # Imported here, not at module top, to avoid a circular import: dag.engine
+    # imports task functions from this module.
+    from dag.engine import DAGEngine
+    from dag.parser import Parser
+
+    parser = Parser(workflow_path)
+    engine = DAGEngine(
+        parser.dag,
+        job_id=job_id,
+        job_type=job_type,
+        callback_url=callback_url,
+        job_inputs={"path": path, "prompts": prompts},
+    )
+    # First draft: sequential only (chain-equivalent), to get the whole
+    # pipeline working end-to-end. execute_parallel() stays defined on
+    # DAGEngine but isn't called yet — it needs a coldstart-service
+    # resource-feasibility check against host capacity first, otherwise
+    # concurrent nodes could try to launch more GPU containers than the
+    # host can actually run at once.
+    return engine.execute()

@@ -13,9 +13,10 @@ RUN mkdir -p /usr/libexec/docker/cli-plugins/ && \
 
 WORKDIR /app
 
-COPY requirements.txt .
+COPY worker/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY . .
+COPY worker/ .
+COPY dag/ ./dag
 
 CMD ["celery", "-A", "tasks", "worker", "--loglevel=info", "--concurrency=1"]
