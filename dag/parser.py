@@ -83,6 +83,8 @@ class DAG:
 class Parser:
     def __init__(self, json_path):
         self.dag = DAG()
+        self.metadata = {}
+        self.settings = {}
         self.parse(json_path)
 
     def parse(self, json_path):
@@ -95,12 +97,21 @@ class Parser:
         with open(json_path, 'r') as f:
             workflow = json.load(f)
 
+        self.metadata = workflow.get('workflow', {})
+        self.settings = workflow.get('settings', {})
+
         tasks = workflow.get('tasks', [])
 
+        structural_keys = {'id', 'depends_on', 'attributes'}
         for task in tasks:
+            # 'attributes' (a legacy nested dict) is merged first; any
+            # top-level field on the task object (task, driver, func,
+            # module, url, service, kwargs, ...) is layered on top and
+            # wins on conflict, since it's the more specific declaration.
             node_attributes = dict(task.get('attributes', {}))
-            if 'task' in task:
-                node_attributes['task'] = task['task']
+            for key, value in task.items():
+                if key not in structural_keys:
+                    node_attributes[key] = value
             self.dag.add_node(task['id'], **node_attributes)
 
         declared_ids = {task['id'] for task in tasks}

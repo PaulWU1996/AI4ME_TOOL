@@ -123,9 +123,6 @@ def process_visual(payload):
         file_name_no_ext = os.path.splitext(file_name)[0]
         save_to_disk(job_id, f"{file_name_no_ext}_visual_output.json", visual_result)
         print(f"[Visual Worker] Success: {len(visual_result)} segments.")
-
-    except Exception as e:
-        print(f"[Visual Worker] Error: {str(e)}")
     finally:
         stop_service("visualservice")
 
@@ -142,14 +139,6 @@ def process_audio(payload):  # change filepath to dict inputs
         prompts:
     }
     """
-    result_template = {
-        "type": "audio",
-        "success": False,
-        "video_name": None,
-        "output": None,
-        "error": None,
-    }
-
     file_path = os.path.normpath(payload["file_path"])
     job_id = payload["job_id"]
     file_name = os.path.basename(file_path)
@@ -187,18 +176,21 @@ def process_audio(payload):  # change filepath to dict inputs
             }
             outputs.append(item)
 
-        result_template.update({"success": True, "output": outputs, "video_name": file_name})
-        print(f"[Audio Worker] Success: Received {len(result_template['output'])} items.")
+        print(f"[Audio Worker] Success: Received {len(outputs)} items.")
 
         file_name_no_ext = os.path.splitext(file_name)[0]
         save_to_disk(job_id, f"{file_name_no_ext}_audio_output.json", outputs)
-
-    except Exception as e:
-        print(f"[Audio Worker] Error: {str(e)}")
-        result_template["error"] = str(e)
     finally:
         stop_service("audioservice")
-    return result_template
+
+    return {
+        **payload,
+        "type": "audio",
+        "success": True,
+        "video_name": file_name,
+        "output": outputs,
+        "error": None,
+    }
 
 
 
@@ -476,6 +468,7 @@ def execute_workflow(self, workflow_path, job_id, path, prompts=None, job_type="
         job_type=job_type,
         callback_url=callback_url,
         job_inputs={"path": path, "prompts": prompts},
+        on_failure=parser.settings.get("on_failure", "stop"),
     )
     # First draft: sequential only (chain-equivalent), to get the whole
     # pipeline working end-to-end. execute_parallel() stays defined on
