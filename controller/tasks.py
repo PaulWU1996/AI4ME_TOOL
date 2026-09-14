@@ -29,8 +29,12 @@ def process_audio(payload):
 def process_visual(payload):
     pass
 
+@app.task(name="tasks.process_gemma")
+def process_gemma(payload):
+    pass
+
 @app.task(name="tasks.finalize_results")
-def finalize_results(job_id, callback_url=None):
+def finalize_results(job_id, job_type="full", callback_url=None):
     pass
 
 @app.task(name="tasks.moments")

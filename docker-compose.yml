@@ -72,6 +72,7 @@ services:
       - TRANSCRIPT_PORT=8000
       - COMPOSE_PROJECT_DIR=/home/ubuntu/tb/AI4ME/AI4ME_TOOL # ${PWD}
       - COMPOSE_FILE=/app/docker-compose.yml
+      - COMPOSE_PROFILES=gemma
     command: celery -A tasks worker --loglevel=info --concurrency=1
     depends_on:
       - redis
@@ -80,6 +81,31 @@ services:
     restart: unless-stopped
     labels:
       - "autoheal=true"
+
+  gemma:
+    build: ./gemma
+    container_name: gemma
+    working_dir: /workspace/AI4ME_TOOL/gemma
+    volumes:
+      - .:/workspace/AI4ME_TOOL
+      - ${HOME}/.cache/huggingface:/root/.cache/huggingface
+    environment:
+      - HF_TOKEN=${HF_TOKEN:-}
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility,video
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [ gpu ]
+    command: ["bash"]
+    stdin_open: true
+    tty: true
+    networks:
+      - ai_network
+    profiles: ["gemma"]
 
   audioservice:
     profiles: [ "on-demand" ]

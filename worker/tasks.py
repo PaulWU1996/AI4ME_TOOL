@@ -53,11 +53,22 @@ app.conf.update(
     task_reject_on_worker_lost=True, 
 )
 
+
+def report_progress(job_id, stage, message):
+    app.backend.store_result(
+        job_id,
+        {"job_id": job_id, "stage": stage, "message": message},
+        state="PROGRESS",
+    )
+
 # --- Download Task ---
 @app.task(name="tasks.download_file")
 def download_file(path, job_id, prompts=None):
+    report_progress(job_id, "download", "Downloading input media")
     output_dir = os.path.join(shared_path, job_id)
+    gemma_dir = os.path.join(shared_path, ".gemma_inputs", job_id)
     os.makedirs(output_dir, exist_ok=True)
+    os.makedirs(gemma_dir, exist_ok=True)
     try:
         parsed = urlparse(path)
         filename = os.path.basename(parsed.path)
@@ -82,10 +93,18 @@ def download_file(path, job_id, prompts=None):
         else:
             raise ValueError(f"Unsupported or missing path: {path}")
 
+        gemma_file = os.path.join(gemma_dir, filename)
+        shutil.copy2(dest, gemma_file)
         print(f"[Downloader] File ready at {dest}")
-        return {"file_path": dest, "job_id": job_id, "prompts": prompts}
+        return {
+            "file_path": dest,
+            "gemma_file_path": gemma_file,
+            "job_id": job_id,
+            "prompts": prompts,
+        }
     except Exception:
         shutil.rmtree(output_dir, ignore_errors=True)
+        shutil.rmtree(gemma_dir, ignore_errors=True)
         raise
 
 
@@ -95,6 +114,13 @@ def _compose(service_name, *args):
     if project_dir:
         cmd += ["--project-directory", project_dir]
     cmd += list(args) + [service_name]
+    subprocess.run(cmd, check=True)
+
+def _compose_run(service_name, command):
+    cmd = ["docker", "compose", "-f", compose_file]
+    if project_dir:
+        cmd += ["--project-directory", project_dir]
+    cmd += ["run", "--rm", service_name, *command]
     subprocess.run(cmd, check=True)
 
 def start_service(service_name, max_retries=1):
@@ -209,6 +235,7 @@ def process_visual(payload):
     job_id = payload["job_id"]
     file_name = os.path.basename(file_path)
     visual_result = None
+    report_progress(job_id, "visual", "Running visual analysis")
 
     start_service("visualservice", max_retries=1)
     try:
@@ -271,6 +298,7 @@ def process_audio(payload): # change filepath to dict inputs
     file_path = os.path.normpath(payload["file_path"])
     job_id = payload["job_id"]
     file_name = os.path.basename(file_path)
+    report_progress(job_id, "audio", "Running audio analysis")
 
     start_service("audioservice", max_retries=1)
     try:
@@ -333,16 +361,63 @@ def process_audio(payload): # change filepath to dict inputs
         stop_service("audioservice")
         # Move the file back from the parent directory
         shutil.move(parent_file_path, current_file_path)
-    return result_template
+    return {**payload, "audio_result": result_template}
+
+
+@app.task(name="tasks.process_gemma")
+def process_gemma(payload):
+    """Run Gemma analysis against the downloaded job video."""
+    file_path = os.path.normpath(payload.get("gemma_file_path") or payload["file_path"])
+    job_id = payload["job_id"]
+    file_name = os.path.basename(payload["file_path"])
+    file_name_no_ext = os.path.splitext(file_name)[0]
+    report_progress(job_id, "gemma", "Running Gemma analysis")
+    container_file_path = file_path.replace("/app/tmp/", "/workspace/AI4ME_TOOL/shared/", 1)
+    container_output_path = os.path.join(
+        "/workspace/AI4ME_TOOL/shared", job_id, file_name_no_ext
+    )
+
+    command = [
+        "python",
+        "analyze_with_gemma.py",
+        container_file_path,
+        "--shot-detection",
+        "detect",
+        "--output",
+        container_output_path,
+    ]
+
+    try:
+        print(f"[Gemma Worker] Starting Task: {file_path}")
+        if not os.path.exists(file_path):
+            raise FileNotFoundError(f"Physical file check failed: {file_path}")
+        _compose_run("gemma", command)
+        print(f"[Gemma Worker] Success: {file_name}")
+        shutil.rmtree(os.path.dirname(file_path), ignore_errors=True)
+        return {**payload, "gemma_result": {"success": True, "video_name": file_name}}
+    except Exception as e:
+        print(f"[Gemma Worker] Error: {str(e)}")
+        return {
+            **payload,
+            "gemma_result": {
+                "success": False,
+                "video_name": file_name,
+                "error": str(e),
+            },
+        }
 
 
 @app.task(name="tasks.finalize_results")
 def finalize_results(job_id, job_type="full", callback_url=None):
+    report_progress(job_id, "finalize", "Collecting analysis results")
     
     workspace = os.path.join(shared_path, job_id)
 
     audio_files = glob.glob(os.path.join(workspace, "*_audio_output.json")) 
     visual_files = glob.glob(os.path.join(workspace, "*_visual_output.json"))
+    gemma_visual_files = glob.glob(os.path.join(workspace, "*_gemma_visual_output.json"))
+    gemma_audio_files = glob.glob(os.path.join(workspace, "*_gemma_audio_output.json"))
+    gemma_transcript_files = glob.glob(os.path.join(workspace, "*_gemma_transcript_output.json"))
 
     audio_data = None
     if audio_files:
@@ -354,6 +429,16 @@ def finalize_results(job_id, job_type="full", callback_url=None):
         with open(visual_files[0], 'r') as f:
             visual_data = json.load(f)
 
+    gemma_data = {}
+    for label, files in (
+        ("visual", gemma_visual_files),
+        ("audio", gemma_audio_files),
+        ("transcript", gemma_transcript_files),
+    ):
+        if files:
+            with open(files[0], "r") as f:
+                gemma_data[label] = json.load(f)
+
     if audio_files:
         video_name = os.path.basename(audio_files[0]).replace("_audio_output.json", "")
     elif visual_files:
@@ -362,7 +447,7 @@ def finalize_results(job_id, job_type="full", callback_url=None):
         video_name = None
 
     all_success = {
-        "full":        audio_data is not None and visual_data is not None,
+        "full":        audio_data is not None and visual_data is not None and len(gemma_data) == 3,
         "audio_only":  audio_data is not None,
         "visual_only": visual_data is not None,
     }.get(job_type, False)
@@ -372,6 +457,7 @@ def finalize_results(job_id, job_type="full", callback_url=None):
         f.write(f"Video Name: {video_name}\n")
         f.write(f"Audio Files: {audio_files}\n")
         f.write(f"Visual Files: {visual_files}\n")
+        f.write(f"Gemma Files: {gemma_visual_files + gemma_audio_files + gemma_transcript_files}\n")
         f.write(f"Status: {'Success' if all_success else 'Partial/Failed'}\n")
 
     if all_success:
@@ -389,6 +475,7 @@ def finalize_results(job_id, job_type="full", callback_url=None):
         "video_name": video_name,
         "audio_result": audio_data,
         "visual_result": visual_data,
+        "gemma_result": gemma_data or None,
         "status": "success" if all_success else "partial/failed"
     }
 
@@ -401,7 +488,8 @@ def finalize_results(job_id, job_type="full", callback_url=None):
     if not all_success:
         raise RuntimeError(
             f"Pipeline incomplete — audio: {'ok' if audio_data else 'missing'}, "
-            f"visual: {'ok' if visual_data else 'missing'}"
+            f"visual: {'ok' if visual_data else 'missing'}, "
+            f"gemma: {'ok' if len(gemma_data) == 3 else 'missing'}"
         )
     return final_output
 
