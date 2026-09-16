@@ -17,7 +17,7 @@ what's scoped-but-not-started, and what blocks what.
 | `execute_parallel()` enablement | **Unblocked on occupancy** — leases shipped (§8). Still gated on an aggregate VRAM feasibility check before it is switched on |
 | 5. Multi-instance service pooling / orchestrator migration | **Explicitly deferred, not scoped** — decided 2026-09-09, see note below |
 | 3b. Deployment-mode split: readiness strategy (single-host vs multi-host) | **Done** — implemented 2026-09-11, see §3b below |
-| 6. Docker-free unit suite for `dag/` | **Done** — 2026-09-16, 124 tests; see §6 for the 8 gaps it surfaced |
+| 6. Docker-free unit suite for `dag/` | **Done** — 2026-09-16, 155 tests; see §6 for the 8 gaps it surfaced |
 | 7. Mock-service e2e stack | **Done** — 2026-09-16, 16 scenarios; see §7 and §9 |
 | 8. Gaps A-I closed | **Done** — 2026-09-16, see §8 |
 | 9. Node-level retry + coverage of every job type | **Done** — 2026-09-16, see §9 |
@@ -399,7 +399,7 @@ arguably should happen before relying further on anything in section 3.
 ## 6. Docker-free unit suite — done (2026-09-16)
 
 `tests/` covers the whole of `dag/` with no Docker, Redis, Celery or GPU:
-**124 passing, 5 xfailed, ~1.5s.** See `tests/README.md` for how the
+**155 passing, ~3s** (124 at the time of writing; grown by §8 and §9). See `tests/README.md` for how the
 isolation works and how to run it.
 
 The trick is that `worker/Dockerfile`'s `COPY worker/ .` flattening makes
