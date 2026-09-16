@@ -1,0 +1,38 @@
+{
+  "workflow": {
+    "name": "audio_only",
+    "version": "1.0"
+  },
+  "settings": {
+    "on_failure": "stop",
+    "retry_backoff": 1.0
+  },
+  "tasks": [
+    {
+      "id": "download",
+      "task": "download_file",
+      "retries": 3,
+      "depends_on": []
+    },
+    {
+      "id": "audio",
+      "task": "process_audio",
+      "service": "audioservice",
+      "depends_on": [
+        "download"
+      ]
+    },
+    {
+      "id": "final",
+      "task": "finalize_results",
+      "kwargs": {
+        "expects": [
+          "audio"
+        ]
+      },
+      "depends_on": [
+        "audio"
+      ]
+    }
+  ]
+}
