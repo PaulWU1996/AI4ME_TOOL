@@ -1,38 +1,48 @@
 {
-    "workflow": {
-        "name": "full_pipeline",
-        "version": "1.0"
+  "workflow": {
+    "name": "full_pipeline",
+    "version": "1.0"
+  },
+  "settings": {
+    "on_failure": "stop",
+    "retry_backoff": 1.0
+  },
+  "tasks": [
+    {
+      "id": "download",
+      "task": "download_file",
+      "depends_on": [],
+      "retries": 3
     },
-    "settings": {
-        "on_failure": "stop"
+    {
+      "id": "visual",
+      "task": "process_visual",
+      "service": "visualservice",
+      "depends_on": [
+        "download"
+      ]
     },
-    "tasks": [
-        {
-            "id": "download",
-            "task": "download_file",
-            "depends_on": []
-        },
-        {
-            "id": "visual",
-            "task": "process_visual",
-            "depends_on": [
-                "download"
-            ]
-        },
-        {
-            "id": "audio",
-            "task": "process_audio",
-            "depends_on": [
-                "visual"
-            ]
-        },
-        {
-            "id": "final",
-            "task": "finalize_results",
-            "depends_on": [
-                "visual",
-                "audio"
-            ]
-        }
-    ]
+    {
+      "id": "audio",
+      "task": "process_audio",
+      "service": "audioservice",
+      "depends_on": [
+        "visual"
+      ]
+    },
+    {
+      "id": "final",
+      "task": "finalize_results",
+      "kwargs": {
+        "expects": [
+          "audio",
+          "visual"
+        ]
+      },
+      "depends_on": [
+        "visual",
+        "audio"
+      ]
+    }
+  ]
 }

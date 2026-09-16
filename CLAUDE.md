@@ -29,14 +29,23 @@ docker-compose up --build worker
 
 ### Test the API locally
 ```bash
-# Submit a job
-curl -X POST "http://localhost:9000/process?path=/app/data/video.mp4"
+# Submit a job (JSON body, not query params)
+curl -X POST http://localhost:9000/process \
+  -H 'Content-Type: application/json' \
+  -d '{"path": "/app/data/video.mp4", "job_type": "full"}'
+
+# Register a DAG workflow template (name + version come from the body)
+curl -X POST http://localhost:9000/workflows \
+  -H 'Content-Type: application/json' \
+  --data-binary @workflows/full_pipeline_1.0.json
 
 # Poll for status
 curl http://localhost:9000/status/<job_id>
 
 # Test with public URL
-curl -X POST "http://localhost:9000/process?path=https://www.w3schools.com/html/mov_bbb.mp4"
+curl -X POST http://localhost:9000/process \
+  -H 'Content-Type: application/json' \
+  -d '{"path": "https://www.w3schools.com/html/mov_bbb.mp4"}' 
 ```
 
 ### One-time directory setup (required before first run)
@@ -64,13 +73,14 @@ mkdir -p ./weights/models
 ### Request Lifecycle
 
 ```
-POST /process (controller)
+POST /process (controller)   # JSON body: {path, job_type, prompts, callback_url, version}
   ↓
-Celery Chord dispatched to Redis:
-  Header (parallel):
-    ├─ download_file → process_visual
-    └─ process_audio
-  Callback: finalize_results
+job_type in workflows/registry.json?
+  ├─ yes -> tasks.execute_workflow  (DAG engine, dag/engine.py)
+  └─ no  -> build_chain()           (legacy hardcoded Celery chain)
+  ↓
+Celery chain dispatched to Redis (sequential, NOT a chord):
+  download_file → process_visual → process_audio → finalize_results
   ↓
 Worker executes tasks:
   ├─ download_file: S3 / HTTP(S) / local → /app/tmp/{job_id}/
@@ -85,7 +95,12 @@ GET /status/{job_id} returns results (or callback_url receives them)
 ### Key Design Decisions
 
 - **`download_file` lives in the worker** (not controller) so the downloaded file lands on the shared volume accessible to the analysis tasks.
-- **Audio and visual tasks run in parallel** via a Celery chord; `finalize_results` is the chord callback and runs only after both complete.
+- **Audio and visual run sequentially today.** `build_chain()` builds a Celery *chain*, not a chord — nothing in the current code runs them concurrently. `DAGEngine.execute_parallel()` exists and is safe with respect to service occupancy (see leases below), but is not enabled yet: it still needs an aggregate VRAM feasibility check, since a per-service lease does not stop two *different* GPU services being jointly resident beyond host capacity.
+- **Service leases (`dag/readiness.py`):** `ensure_ready`/`release` are reference-counted, re-entrant per thread, and capped by a per-service `concurrency` (default 1, overridable with the `SERVICE_CONCURRENCY` env var as JSON). The container starts on the first holder and stops on the last, so the engine's bracket around a node declaring `service` and the task body's own bracket nest into a single start/stop rather than cycling the container twice. A queued waiter inherits a running service instead of it being stopped and cold-started again. These are in-process locks: they cover threads in one worker process, not multiple workers or hosts.
+- **`finalize_results` success criteria are declarative.** A workflow's finalize node declares `kwargs.expects` (e.g. `["audio", "visual"]`). Without it, the legacy per-`job_type` table applies, so the hardcoded chains keep their exact semantics — but a workflow registered under a name that is not a legacy `job_type` must declare `expects`, or the job fails at the final node.
+- **Retries are per node, in the engine, not per Celery task.** `tasks.execute_workflow` is a *single* Celery task covering the whole DAG, so a Celery-level retry would re-run every node — including the expensive GPU ones — to recover from one transient download. Celery's `@app.task(autoretry_for=...)` also never engages on the DAG path at all, because the python driver calls a task's function directly rather than dispatching it. A workflow sets `settings.retries` as a default and overrides it per node with a `retries` attribute; `settings.retry_backoff`/`retry_backoff_max` control the doubling delay. A retry re-attempts the whole bracket including service acquisition, so a node whose service failed to start gets a fresh cold start — and its side effects run again, so only declare retries on nodes that tolerate that.
+- **One `/status` contract.** Both paths return `finalize_results`'s merged output. DAG jobs additionally write per-node envelopes to `{job_id}/dag_run.json` in the workspace, so node-level detail is available for debugging without changing the wire shape.
+- **`PYTHONPATH=/app` is required in both images.** Celery's app loader puts the working directory on `sys.path` only while importing the app module, then removes it — so any import that happens later (inside a task body) fails without it.
 - **On-demand containers:** the worker dynamically starts/stops on-demand services (`audioservice`, `visualservice`, `transcriptservice`) via the Docker Python SDK using the host Docker socket (`/var/run/docker.sock`). Health checks poll for 330s before timing out.
 - **Service modes (cold-start vs keepalive):** `scripts/start.sh` (see "Service Modes" below) resolves, per service, whether it cold-starts per job (default, historical behavior) or stays resident ("keepalive") across jobs. The resolved selection is written to `shared/service_modes.json`, which `worker/utils.py` reads once at import — `start_service`/`stop_service` skip the start/stop cycle for any service marked `keepalive`, falling back to normal cold-start recovery if a keepalive container isn't actually healthy.
 - **Task reliability settings** in both `controller/main.py` and `worker/tasks.py`: `task_acks_late=True`, `task_reject_on_worker_lost=True`, prefetch=1, visibility timeout=1h. These are required for long-running GPU workloads.
@@ -110,6 +125,10 @@ GET /status/{job_id} returns results (or callback_url receives them)
 - `API_KEY_PATH` — path where the visual API key is cached
 - `COMPOSE_PROJECT_DIR`, `COMPOSE_FILE` — docker-compose context for `_compose()` helper
 - `SERVICE_MODES_PATH` — path to the resolved cold-start/keepalive selection written by `scripts/start.sh` (default `/app/tmp/service_modes.json`)
+- `DEPLOYMENT_MODE` — `single_host` (default; starts containers over the Docker socket) or `multi_host` (checks reachability only)
+- `SERVICE_CONCURRENCY` — JSON object of per-service lease limits, e.g. `{"transcriptservice": 2}` (default 1 each)
+- `LEASE_TIMEOUT` — seconds a node waits for a busy service before failing (default 3600, matching the Celery visibility timeout)
+- `HEALTH_CHECK_TIMEOUT` / `HEALTH_CHECK_INTERVAL` — container health poll budget and cadence (defaults 330s / 60s)
 
 ## Service Modes
 
@@ -128,3 +147,24 @@ Services not passed to `--keepalive` default to `coldstart` (today's behavior �
 - `controller/tasks.py` — Celery task *signatures* (producer side, no logic)
 - `worker/tasks.py` — All processing logic: `download_file`, `process_visual`, `process_audio`, `finalize_results`, plus service management helpers
 - `docker-compose.yml` — Single source of truth for service wiring, volumes, and networking
+
+## Testing
+
+Two suites, neither needing a GPU:
+
+```bash
+python3 -m venv venv && ./venv/bin/pip install -r tests/requirements-dev.txt
+
+./venv/bin/python -m pytest                      # 140 unit tests, ~3s, no Docker at all
+./venv/bin/python tests/e2e/run_e2e.py           # 13 scenarios, ~2.5 min, real stack + mock services
+```
+
+`tests/` unit-tests `dag/` with stub modules installed in `sys.modules` under
+the names the worker image exposes them as. `tests/e2e/` runs the real
+controller, worker, Redis, Celery and Docker-socket orchestration against
+`mocks/service.py`, a stdlib stand-in for the four GPU services. See
+`tests/README.md` and `tests/e2e/README.md`.
+
+The mocks encode what `worker/tasks.py` *believes* the service contracts are.
+Verifying those against the real services is the one thing neither suite can
+do.

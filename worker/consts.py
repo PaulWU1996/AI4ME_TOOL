@@ -40,5 +40,9 @@ service_modes_path = os.getenv("SERVICE_MODES_PATH", "/app/tmp/service_modes.jso
 
 transcript_text_file = "transcript.txt"
 
-HEALTH_CHECK_TIMEOUT = 330
-HEALTH_CHECK_INTERVAL = 60
+# How long start_service() waits for a container to report healthy, and how
+# often it re-checks. Defaults are sized for GPU services loading multi-GB
+# weights; env-overridable so a mock stack (tests/e2e/) can poll in seconds
+# instead of spending a minute per cold start.
+HEALTH_CHECK_TIMEOUT = int(os.getenv("HEALTH_CHECK_TIMEOUT", "330"))
+HEALTH_CHECK_INTERVAL = int(os.getenv("HEALTH_CHECK_INTERVAL", "60"))

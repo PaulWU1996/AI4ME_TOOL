@@ -103,7 +103,14 @@ class Parser:
         tasks = workflow.get('tasks', [])
 
         structural_keys = {'id', 'depends_on', 'attributes'}
+        seen_ids = set()
         for task in tasks:
+            # networkx merges attributes when add_node() is called twice with
+            # the same id, so a duplicate would silently collapse two tasks
+            # into one and lose whichever was declared first, with no error.
+            if task['id'] in seen_ids:
+                raise ValueError(f"Duplicate task id '{task['id']}' in workflow.")
+            seen_ids.add(task['id'])
             # 'attributes' (a legacy nested dict) is merged first; any
             # top-level field on the task object (task, driver, func,
             # module, url, service, kwargs, ...) is layered on top and

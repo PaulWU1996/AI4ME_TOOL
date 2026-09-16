@@ -1,5 +1,6 @@
 import concurrent.futures
 import importlib
+import time
 
 import networkx as nx
 
@@ -35,12 +36,17 @@ class TaskExecutionError(Exception):
     """Raised when a node's driver returns a failure envelope."""
 
 
+DEFAULT_RETRY_BACKOFF = 1.0
+DEFAULT_RETRY_BACKOFF_MAX = 60.0
+
+
 ON_FAILURE_MODES = {"stop", "continue"}
 
 
 class DAGEngine:
     def __init__(self, dag: DAG, job_id, job_type="full", callback_url=None, job_inputs=None,
-                 on_failure="stop"):
+                 on_failure="stop", retries=0, retry_backoff=DEFAULT_RETRY_BACKOFF,
+                 retry_backoff_max=DEFAULT_RETRY_BACKOFF_MAX):
         """
         job_inputs: per-job runtime input from the client request (e.g.
         {"path": ..., "prompts": ...}), analogous to `ProcessRequest` in
@@ -54,6 +60,28 @@ class DAGEngine:
         keys), since "continue" doesn't skip them, only avoids halting
         early. Sourced from a workflow's `settings.on_failure`, e.g. by
         passing `Parser(...).settings.get("on_failure", "stop")`.
+
+        retries: how many times to re-attempt a node that fails, on top of
+        the first attempt (0 = today's behaviour, one shot). Retry lives
+        here rather than on the Celery task because `tasks.execute_workflow`
+        is a single Celery task covering the *entire* DAG — a Celery-level
+        retry would re-run every node, including the expensive GPU ones,
+        to recover from one transient download. A node-level default can be
+        set per workflow via `settings.retries` and overridden per node with
+        a `retries` attribute.
+
+        Note this replaces what `@app.task(autoretry_for=...)` gives the
+        legacy chains: the python driver calls a task's function directly,
+        so Celery's retry machinery never engages on the DAG path.
+
+        retry_backoff / retry_backoff_max: seconds before the first retry,
+        doubling each attempt, capped. Mirrors Celery's retry_backoff.
+
+        Retries re-attempt the whole bracket, service acquisition included,
+        so a node whose service failed to start gets a fresh cold start
+        rather than being handed the same broken container. A retried node's
+        side effects run again, so only declare retries on nodes that
+        tolerate that.
         """
         if on_failure not in ON_FAILURE_MODES:
             raise ValueError(f"Unknown on_failure mode '{on_failure}'. Choose from: {ON_FAILURE_MODES}")
@@ -63,6 +91,9 @@ class DAGEngine:
         self.callback_url = callback_url
         self.job_inputs = job_inputs or {}
         self.on_failure = on_failure
+        self.retries = retries
+        self.retry_backoff = retry_backoff
+        self.retry_backoff_max = retry_backoff_max
         self.executed_nodes = set()
         self.node_results = {}
 
@@ -105,6 +136,12 @@ class DAGEngine:
             elif driver_name == 'http' and not attrs.get('url'):
                 raise UnknownTaskError(f"Node '{node_id}' (http driver) has no 'url' attribute.")
 
+            retries = attrs.get('retries', self.retries)
+            if not isinstance(retries, int) or isinstance(retries, bool) or retries < 0:
+                raise UnknownTaskError(
+                    f"Node '{node_id}': 'retries' must be a non-negative integer, got {retries!r}."
+                )
+
             if attrs.get('service'):
                 try:
                     validate_mode()
@@ -135,6 +172,23 @@ class DAGEngine:
                 merged[key] = value
         return merged
 
+    def _attempt_node(self, node_id, node_attributes, driver, call_attributes, inputs):
+        """One attempt at a node: acquire its service if it declares one, run
+        the driver, release. Always returns an envelope, never raises for a
+        task-level failure, so the retry loop above can decide what to do."""
+        service_name = node_attributes.get('service')
+        if not service_name:
+            return driver.run(call_attributes, inputs)
+
+        try:
+            ensure_ready(service_name)
+        except ServiceNotReadyError as e:
+            return failure(str(e))
+        try:
+            return driver.run(call_attributes, inputs)
+        finally:
+            release(service_name)
+
     def execute_node(self, node_id):
         """Execute a single node by dispatching to its driver."""
         node_attributes = self.dag.get_node_attributes(node_id)
@@ -158,13 +212,18 @@ class DAGEngine:
                         f"Node '{node_id}' (download_file) has no 'path' — "
                         "supply one via job_inputs (the request) or the node's kwargs."
                     )
-                inputs = {'path': path, 'job_id': self.job_id, 'prompts': prompts}
+                computed = {'path': path, 'job_id': self.job_id, 'prompts': prompts}
             else:  # finalize_results
-                inputs = {
+                computed = {
                     'job_id': self.job_id,
                     'job_type': self.job_type,
                     'callback_url': self.callback_url,
                 }
+            # Static kwargs still reach these nodes, they just cannot override
+            # the job context the engine owns. This is how a finalize node
+            # declares `expects`, and how any future job-context task takes
+            # template-level configuration.
+            inputs = {**static_kwargs, **computed}
             call_attributes = {**node_attributes, 'call': 'kwargs'}
         else:
             payload = self._merge_predecessor_payloads(node_id)
@@ -178,19 +237,18 @@ class DAGEngine:
             inputs = payload
             call_attributes = {**node_attributes, 'call': 'payload'}
 
-        service_name = node_attributes.get('service')
-        if service_name:
-            try:
-                ensure_ready(service_name)
-            except ServiceNotReadyError as e:
-                envelope = failure(str(e))
-            else:
-                try:
-                    envelope = driver.run(call_attributes, inputs)
-                finally:
-                    release(service_name)
-        else:
-            envelope = driver.run(call_attributes, inputs)
+        retries = node_attributes.get('retries', self.retries)
+        envelope = None
+        for attempt in range(retries + 1):
+            envelope = self._attempt_node(node_id, node_attributes, driver, call_attributes, inputs)
+            if envelope['status'] == 'success' or attempt == retries:
+                break
+            delay = min(self.retry_backoff * (2 ** attempt), self.retry_backoff_max)
+            print(
+                f"[DAGEngine] Node '{node_id}' ({task_name}) attempt {attempt + 1}/"
+                f"{retries + 1} failed: {envelope['error']} — retrying in {delay}s."
+            )
+            time.sleep(delay)
 
         self.node_results[node_id] = envelope
         self.executed_nodes.add(node_id)
@@ -207,6 +265,34 @@ class DAGEngine:
             print(f"[DAGEngine] {message} — on_failure='continue', proceeding.")
 
         return envelope
+
+    def terminal_result(self):
+        """The result a client should see for this job.
+
+        A workflow ending in finalize_results has a single meaningful output
+        — finalize's merged payload — and that is what the legacy Celery
+        chains return, so returning it here keeps one `/status` contract
+        across both paths. Workflows with no finalize node have no such
+        summary, so the full node map is returned instead.
+
+        The per-node envelopes are never lost: run_summary() writes them to
+        the job workspace for debugging.
+        """
+        for node_id in reversed(self.dag.topological_sort()):
+            if self._task_name(node_id) == 'finalize_results':
+                envelope = self.node_results.get(node_id)
+                if envelope and envelope.get('status') == 'success':
+                    return envelope.get('data')
+        return self.node_results
+
+    def run_summary(self):
+        """Per-node envelopes plus the resolved execution order, for writing
+        alongside a job's outputs."""
+        return {
+            'order': self.dag.topological_sort(),
+            'executed': sorted(self.executed_nodes),
+            'nodes': self.node_results,
+        }
 
     def execute(self):
         """Execute the DAG in topological order."""

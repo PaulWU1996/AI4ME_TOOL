@@ -15,14 +15,20 @@ from consts import (
     transcript_text_file,
 )
 from utils import (
-    start_service,
     ensure_api_key,
     extract_flat_captions,
-    stop_service,
     save_to_disk,
     get_speaker_turn_boundary_ms,
     load_json_file
 )
+# Service lifecycle goes through the lease in dag/readiness.py rather than
+# calling utils.start_service/stop_service directly. The lease is
+# reference-counted and re-entrant, so when a task runs as a DAG node whose
+# workflow also declares `service`, the engine's bracket and this one nest
+# into a single start/stop instead of cycling the container twice.
+from dag.engine import DAGEngine
+from dag.parser import Parser
+from dag.readiness import ensure_ready, release
 
 # --- Celery ---
 app = Celery(
@@ -100,7 +106,7 @@ def process_visual(payload):
     file_name = os.path.basename(file_path)
     visual_result = None
 
-    start_service("visualservice", max_retries=1)
+    ensure_ready("visualservice")
     try:
         api_key = ensure_api_key()
         if not api_key:
@@ -124,7 +130,7 @@ def process_visual(payload):
         save_to_disk(job_id, f"{file_name_no_ext}_visual_output.json", visual_result)
         print(f"[Visual Worker] Success: {len(visual_result)} segments.")
     finally:
-        stop_service("visualservice")
+        release("visualservice")
 
     # pass visual chunks forward so process_audio can use them for chunk splitting
     return {**payload, "visual_result": visual_result}
@@ -143,7 +149,7 @@ def process_audio(payload):  # change filepath to dict inputs
     job_id = payload["job_id"]
     file_name = os.path.basename(file_path)
 
-    start_service("audioservice", max_retries=1)
+    ensure_ready("audioservice")
     try:
         print(f"[Audio Worker] Starting Task: {file_path}")
 
@@ -181,7 +187,7 @@ def process_audio(payload):  # change filepath to dict inputs
         file_name_no_ext = os.path.splitext(file_name)[0]
         save_to_disk(job_id, f"{file_name_no_ext}_audio_output.json", outputs)
     finally:
-        stop_service("audioservice")
+        release("audioservice")
 
     return {
         **payload,
@@ -197,7 +203,23 @@ def process_audio(payload):  # change filepath to dict inputs
 
 
 @app.task(name="tasks.finalize_results")
-def finalize_results(job_id, job_type="full", callback_url=None):
+def finalize_results(job_id, job_type="full", callback_url=None, expects=None):
+    """Merge a job's outputs, write task_info.txt, and report success.
+
+    `expects` names which results must be present for the job to count as a
+    success, e.g. ["audio", "visual"]. A DAG workflow declares it on the
+    finalize node:
+
+        {"id": "final", "task": "finalize_results",
+         "kwargs": {"expects": ["audio", "visual"]}, "depends_on": [...]}
+
+    When it is omitted, the legacy per-job_type table below is used, so the
+    hardcoded chains in controller/main.py keep their exact semantics. A
+    workflow registered under a name that is not one of those legacy job
+    types must declare `expects` — otherwise there is no way to know what
+    "done" means for it, and the job used to fail at the final node even
+    though every other node had succeeded.
+    """
 
     workspace = os.path.join(shared_path, job_id)
 
@@ -226,15 +248,42 @@ def finalize_results(job_id, job_type="full", callback_url=None):
     else:
         file_name = None
 
-    job_success = {
-        "full": audio_data is not None and visual_data is not None,
-        "audio_only": audio_data is not None,
-        "visual_only": visual_data is not None,
-        "summarise": summarise_data is not None and tagging_data is not None,
-        "speaker-extent-summarise": extent_data is not None and summarise_data is not None and tagging_data is not None,
-        "utterance-extent-summarise": extent_data is not None and summarise_data is not None and tagging_data is not None,
-        "tagging": tagging_data is not None,
-    }.get(job_type, False)
+    produced = {
+        "audio": audio_data,
+        "visual": visual_data,
+        "summarise": summarise_data,
+        "extent": extent_data,
+        "tagging": tagging_data,
+    }
+
+    LEGACY_EXPECTATIONS = {
+        "full": ["audio", "visual"],
+        "audio_only": ["audio"],
+        "visual_only": ["visual"],
+        "summarise": ["summarise", "tagging"],
+        "speaker-extent-summarise": ["extent", "summarise", "tagging"],
+        "utterance-extent-summarise": ["extent", "summarise", "tagging"],
+        "tagging": ["tagging"],
+    }
+
+    if expects is None:
+        expects = LEGACY_EXPECTATIONS.get(job_type)
+    if expects is None:
+        raise ValueError(
+            f"job_type '{job_type}' has no built-in success criteria. Declare "
+            f"kwargs.expects on the finalize node of its workflow, e.g. "
+            f'"kwargs": {{"expects": {sorted(produced)}}}.'
+        )
+
+    unknown = [name for name in expects if name not in produced]
+    if unknown:
+        raise ValueError(
+            f"finalize_results: unknown expects entries {unknown}; "
+            f"choose from {sorted(produced)}."
+        )
+
+    missing = [name for name in expects if produced[name] is None]
+    job_success = not missing
 
     with open(os.path.join(workspace, "task_info.txt"), "w") as f:
         f.write(f"Job ID: {job_id}\n")
@@ -244,6 +293,8 @@ def finalize_results(job_id, job_type="full", callback_url=None):
         f.write(f"Summarise Files: {summarise_files}\n")
         f.write(f"Extent Files: {extent_files}\n")
         f.write(f"Tagging Files: {tagging_files}\n")
+        f.write(f"Expects: {expects}\n")
+        f.write(f"Missing: {missing}\n")
         f.write(f"Status: {'Success' if job_success else 'Partial/Failed'}\n")
 
     if job_success:
@@ -275,7 +326,9 @@ def finalize_results(job_id, job_type="full", callback_url=None):
             print(f"[Callback Warning] Failed to send callback: {str(e)}")
 
     if not job_success:
-        raise RuntimeError(f"{job_type} failed: {summarise_data}.")
+        raise RuntimeError(
+            f"{job_type} failed: expected {expects}, missing {missing}."
+        )
 
     return final_output
 
@@ -303,7 +356,7 @@ def run_service_task(
     }
 
     try:
-        start_service(service_name, max_retries=1)
+        ensure_ready(service_name)
         print(f"{log_tag} Starting Task: {job_id}")
 
         response = requests.post(
@@ -329,7 +382,7 @@ def run_service_task(
         print(f"{log_tag} Error: {str(e)}")
         result_template["error"] = str(e)
     finally:
-        stop_service(service_name)
+        release(service_name)
 
     return {**payload, result_key: result_template}
 
@@ -348,7 +401,7 @@ def process_summarise(payload):
 
 
 @app.task(name="tasks.process_tags")
-def process_tagging(payload):
+def process_tags(payload):
     return run_service_task(
         payload=payload,
         task_type="tags",
@@ -456,11 +509,6 @@ def execute_workflow(self, workflow_path, job_id, path, prompts=None, job_type="
     `path`/`prompts` into the DAG as runtime input (job_inputs) rather than
     baking them into the template.
     """
-    # Imported here, not at module top, to avoid a circular import: dag.engine
-    # imports task functions from this module.
-    from dag.engine import DAGEngine
-    from dag.parser import Parser
-
     parser = Parser(workflow_path)
     engine = DAGEngine(
         parser.dag,
@@ -469,11 +517,30 @@ def execute_workflow(self, workflow_path, job_id, path, prompts=None, job_type="
         callback_url=callback_url,
         job_inputs={"path": path, "prompts": prompts},
         on_failure=parser.settings.get("on_failure", "stop"),
+        # Node-level retry. The legacy chains get this from
+        # @app.task(autoretry_for=...), which does not engage on the DAG path
+        # because the python driver calls the task's function directly — and
+        # a Celery-level retry of execute_workflow would re-run the whole DAG
+        # rather than the one node that failed.
+        retries=parser.settings.get("retries", 0),
+        retry_backoff=parser.settings.get("retry_backoff", 1.0),
+        retry_backoff_max=parser.settings.get("retry_backoff_max", 60.0),
     )
-    # First draft: sequential only (chain-equivalent), to get the whole
-    # pipeline working end-to-end. execute_parallel() stays defined on
-    # DAGEngine but isn't called yet — it needs a coldstart-service
-    # resource-feasibility check against host capacity first, otherwise
-    # concurrent nodes could try to launch more GPU containers than the
-    # host can actually run at once.
-    return engine.execute()
+    # Sequential by default. execute_parallel() is now safe as far as
+    # service occupancy goes — dag/readiness.py leases refcount holders and
+    # cap concurrency per service — but enabling it still needs an aggregate
+    # resource-feasibility check, since a lease stops one service being
+    # doubly occupied without stopping two *different* GPU services being
+    # jointly resident beyond host VRAM.
+    engine.execute()
+
+    # Per-node envelopes go to the workspace rather than into the task
+    # result, so /status returns the same shape for DAG jobs as it does for
+    # the legacy chains (finalize's merged output) without losing the
+    # node-level detail that makes a failed run diagnosable.
+    try:
+        save_to_disk(job_id, "dag_run.json", engine.run_summary())
+    except Exception as e:
+        print(f"[DAG] Could not write dag_run.json: {e}")
+
+    return engine.terminal_result()

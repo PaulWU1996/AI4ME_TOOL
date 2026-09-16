@@ -11,12 +11,16 @@ what's scoped-but-not-started, and what blocks what.
 | 1. Driver dispatch unification | **Done** |
 | 2. Standard task envelope (steps 1-3) | **Done** |
 | 2b. `settings.on_failure` actually wired (bonus fix found along the way) | **Done** |
-| 3. Service lifecycle + auth generalization | **Partially done** — readiness (§3b) shipped; `auth` field/injection still not started |
+| 3. Service lifecycle + auth generalization | **Lifecycle done** — readiness (§3b) + leases (§8) shipped, task bodies migrated off `start_service`/`stop_service`; `auth` field/injection still not started |
 | 4. Retire `build_chain()` / legacy Celery chains | **Not started** — blocks the rest of #2, and most of #3 |
-| Live `docker-compose up --build` verification | **Never done** — everything below is verified by simulation/dry-run, not a real run |
-| `execute_parallel()` enablement | **Deferred** — needs #3's resource-feasibility check first |
+| Live `docker-compose up --build` verification | **Done against mocks** — 2026-09-16, §7. Found and fixed a `PYTHONPATH` bug that had made the DAG path unrunnable. Not yet run against the real GPU services |
+| `execute_parallel()` enablement | **Unblocked on occupancy** — leases shipped (§8). Still gated on an aggregate VRAM feasibility check before it is switched on |
 | 5. Multi-instance service pooling / orchestrator migration | **Explicitly deferred, not scoped** — decided 2026-09-09, see note below |
 | 3b. Deployment-mode split: readiness strategy (single-host vs multi-host) | **Done** — implemented 2026-09-11, see §3b below |
+| 6. Docker-free unit suite for `dag/` | **Done** — 2026-09-16, 124 tests; see §6 for the 8 gaps it surfaced |
+| 7. Mock-service e2e stack | **Done** — 2026-09-16, 16 scenarios; see §7 and §9 |
+| 8. Gaps A-I closed | **Done** — 2026-09-16, see §8 |
+| 9. Node-level retry + coverage of every job type | **Done** — 2026-09-16, see §9 |
 
 ---
 
@@ -389,3 +393,251 @@ verification so far is syntax checks, simulated image-layout imports, and
 dry runs with stub functions standing in for the real ones. This is the
 natural next step whenever it's convenient to run the full stack — and
 arguably should happen before relying further on anything in section 3.
+
+---
+
+## 6. Docker-free unit suite — done (2026-09-16)
+
+`tests/` covers the whole of `dag/` with no Docker, Redis, Celery or GPU:
+**124 passing, 5 xfailed, ~1.5s.** See `tests/README.md` for how the
+isolation works and how to run it.
+
+The trick is that `worker/Dockerfile`'s `COPY worker/ .` flattening makes
+`utils`, `consts` and `tasks` **top-level modules** inside the image, so the
+suite reproduces that layout by installing stubs into `sys.modules` under
+the same names — the real import statements in `dag/readiness.py` and
+`dag/drivers/python.py` run unmodified. The `http` driver and multi-host
+readiness run against a real loopback `ThreadingHTTPServer`, not a
+monkeypatched `requests`.
+
+Also removed: the old top-level `test_parser.py`, which imported
+`worker.dag.parser` (the package moved to top-level `dag/`), read a
+`full_workflow.json` that does not exist, and wrapped everything in a bare
+`try/except` — so it could never fail. `__pycache__` was tracked in git and
+is now ignored.
+
+### Gaps found while writing it
+
+Each is pinned by a test marked `@pytest.mark.gap` + `xfail(strict=True)`,
+so closing the gap turns the test into a failure and forces the marker out.
+
+| # | Gap | Pinned by |
+|---|---|---|
+| A | `registry.json` registers `full_pipeline`; `SUPPORTED_JOB_TYPES` has `full`. Different strings, so no request takes the DAG path by default | — (routing, no test yet) |
+| B | `/status` returns finalize's merged output on the legacy path but the whole node→envelope dict on the DAG path. A client cannot parse both | — |
+| C | No node in `full_pipeline_1.0.json` declares `service`, so §3b's readiness layer is unreachable from the only registered workflow | `test_parser.py::test_shipped_workflow_declares_no_service_anywhere` |
+| D | Adding `service` to that workflow double-manages the container: engine starts it, `worker/tasks.py:103` starts it again, the task's `finally` stops it, then the engine stops it | — |
+| E | No lease/refcount: two concurrent nodes sharing a service start it twice, and the first to finish stops it **while the other is still mid-request** | `test_engine.py::test_shared_service_should_{be_started_once,not_be_stopped_while_still_in_use}` |
+| F | `from utils import start_service` escapes as `ModuleNotFoundError` if the Dockerfile layout ever changes, bypassing `dag/engine.py:185` and the workflow's `on_failure` entirely | `test_readiness.py::test_single_host_missing_utils_should_be_a_service_not_ready_error` |
+| G | Duplicate task ids silently merge into one node — a task vanishes with no diagnostic | `test_parser.py::test_duplicate_task_id_should_be_rejected` |
+| H | `CLAUDE.md` describes a Celery **chord** running audio and visual in parallel. `build_chain()` is a sequential `chain`; nothing in the codebase has ever run them in parallel | — |
+
+**E is the blocker for `execute_parallel()`**, and is narrower than the
+resource-feasibility check named in the status table above: a per-service
+lease stops one service being doubly occupied, but does *not* stop two
+different GPU services being jointly resident beyond host VRAM. Leases are
+necessary, not sufficient.
+
+Note on H: `execute_parallel()` is therefore not restoring lost
+parallelism — it would be adding parallelism this system has never had.
+
+### Still needs a live stack
+
+Real `start_service` orchestration, `scripts/start_services.py`'s
+`nvidia-smi`/`free -m` measured pass, Celery/Redis routing, and the
+analysis services' actual HTTP contracts. Unchanged from the section above.
+
+---
+
+## 7. Mock-service end-to-end stack — done (2026-09-16)
+
+`tests/e2e/` runs the **real** controller, worker, Redis, Celery, shared
+volume and Docker-socket orchestration, with only the four GPU analysis
+services swapped for `mocks/service.py` (stdlib HTTP, no weights, no GPU).
+**12 scenarios, ~2.5 minutes, on a laptop.** See `tests/e2e/README.md`.
+
+### The finding that justified the whole exercise
+
+Every DAG job failed with:
+
+```
+ModuleNotFoundError: No module named 'dag'
+  File "/app/tasks.py", line 461, in execute_workflow
+    from dag.engine import DAGEngine
+```
+
+Celery's app loader puts the working directory on `sys.path` only *while it
+imports the app module*, then takes it back off. So `tasks.py`'s
+module-level imports resolve at boot, but the **lazy** import inside
+`execute_workflow` runs later, when `/app` is no longer importable. The
+package was sitting right there in the image the whole time.
+
+**The DAG path had never once executed under a real Celery worker.** Every
+"verified" claim in sections 1, 2, 2b, 3b above was verified by simulation
+against a code path that could not run. The legacy `build_chain()` path was
+unaffected and worked first try.
+
+Fixed with `ENV PYTHONPATH=/app` in `worker/Dockerfile` and
+`controller/Dockerfile`. Worth noting the stale comment at
+`worker/tasks.py:459` justifying the lazy import as circular-import
+avoidance: since the driver-dispatch work in §1, `dag.engine` no longer
+imports task functions at all, so that import could simply move to module
+scope and fail fast at worker boot instead of mid-job.
+
+### Gaps confirmed empirically
+
+- **Gap D** (double-managed containers) is real and measured: a workflow node
+  declaring `service` stops `visualservice` **twice** for a single node —
+  once in the task body's `finally`, once in the engine's. Scenario
+  `dag-service-declared`.
+- **Gap B** (incompatible `/status` shapes) demonstrated side by side from
+  the same request: legacy returns
+  `[audio_result, extent_result, job_id, status, summarise_result,
+  tagging_result, video_name, visual_result]`; the DAG returns
+  `[audio, download, final, visual]`. Scenario `status-shape-differs`.
+- **Gap A** is what makes `dag-full` work at all: the workflow must be
+  registered under the built-in name `full`, not a new name, or `/process`
+  never routes to the DAG. Worse, `finalize_results`'s `job_success` map is
+  keyed by the legacy `job_type` names, so a workflow registered under a
+  novel name fails at the final node even when every other node succeeded.
+
+### New gap I: task name vs function name
+
+`build_chain()` refers to the tagging step as `tasks.process_tags` (the
+Celery task name), but the function is `process_tagging`. The python driver
+resolves a **Python attribute**, not a Celery task name, so a workflow JSON
+copied from `build_chain()` fails pre-flight with `UnknownTaskError`. Only
+this one task diverges. Either rename the function or teach the driver to
+fall back to the Celery registry.
+
+### Also changed
+
+`HEALTH_CHECK_TIMEOUT` / `HEALTH_CHECK_INTERVAL` in `worker/consts.py` are
+now env-overridable (defaults unchanged at 330s/60s). Without that every mock
+cold start cost a full 60-second poll interval.
+
+### Still not covered
+
+The real services' actual HTTP contracts and payload shapes, real model
+latency and VRAM behaviour, and `scripts/start_services.py`'s
+`nvidia-smi`/`free -m` measured pass. The mocks encode what `worker/tasks.py`
+*believes* the contracts are — if that belief is wrong, only the real
+services will say so.
+
+---
+
+## 8. Gaps A-I closed — done (2026-09-16)
+
+Everything §6 and §7 surfaced, except the real-service HTTP contracts, which
+need the GPU stack. **140 unit tests, 13 e2e scenarios, all passing.**
+
+### The central move: leases (gaps D and E were one problem)
+
+`dag/readiness.py`'s `ensure_ready`/`release` are now **reference-counted,
+re-entrant per thread, and concurrency-capped per service**:
+
+- **Refcount** — the container starts on the first holder and stops on the
+  last, so two concurrent nodes sharing a service produce one start and one
+  stop, and neither can stop it while the other is mid-request. *(gap E)*
+- **Re-entrancy** — a task body bracketing its own work *inside*
+  `dag/engine.py`'s bracket is the same logical holder, not a second one.
+  Without this, a node whose workflow declares `service` would deadlock
+  against itself at concurrency 1. This is what let `worker/tasks.py` migrate
+  off `start_service`/`stop_service` while the legacy chains keep working
+  unchanged. *(gap D)*
+- **Waiter-aware release** — a queued caller inherits a running service
+  rather than it being stopped and cold-started again between two nodes that
+  both want it.
+- **Concurrency limit** — default 1, overridable via `SERVICE_CONCURRENCY`.
+  `config/services.json` carries the declarative value; the env var is what
+  reaches the worker today, since that file is not mounted into the image.
+
+Still in-process only: threads in one worker process, not across workers or
+hosts. Cross-process needs a Redis lock, which is the pooling work deferred
+on 2026-09-09.
+
+### The rest
+
+| Gap | Fix |
+|---|---|
+| A | `finalize_results` takes `expects` (e.g. `["audio","visual"]`) from the finalize node's `kwargs`, falling back to the legacy per-`job_type` table. A workflow under a novel name now runs clean instead of failing at the last node. `DAGEngine` passes static kwargs to job-context tasks to make this reachable |
+| B | One `/status` contract: both paths return `finalize_results`'s merged output. Per-node envelopes go to `{job_id}/dag_run.json` instead of onto the wire, via `DAGEngine.terminal_result()` / `run_summary()` |
+| C | `workflows/full_pipeline_1.0.json` declares `service` on its visual and audio nodes, so the readiness layer is actually reachable from the shipped pipeline |
+| D | Solved by re-entrant leases, above |
+| E | Solved by refcounted leases, above |
+| F | `_single_host_start`/`_single_host_stop` wrap the `utils` import and raise `ServiceNotReadyError`, so a layout change cannot bypass `on_failure` |
+| G | `Parser` rejects duplicate task ids instead of letting networkx silently merge two tasks into one |
+| H | CLAUDE.md corrected: `build_chain()` is a sequential *chain*, not a chord; `/process` takes a JSON body, not query params. Leases, `expects`, the `/status` contract and the new env vars documented |
+| I | The tagging function is renamed `process_tags` to match its Celery task name, so a workflow copied from `build_chain()` resolves |
+
+### Verification
+
+Three unit tests that were `xfail(strict=True)` gap markers flipped to XPASS
+the moment the fix landed and forced their own rewrite — which is what the
+strict marker was for. No `gap` markers remain.
+
+### What is left
+
+- **#4, `build_chain()` retirement.** Now genuinely optional rather than
+  blocking: `/status` shapes match, and any `job_type` can be expressed as a
+  registered workflow. Retiring it means shipping a workflow per legacy
+  `job_type` and deleting the fallback branch in `controller/main.py`.
+- **`auth` field/injection** (the remainder of §3).
+- **`execute_parallel()`** — needs the aggregate VRAM check, not a lease.
+- **Cross-process leases** — only if a second worker or `--concurrency>1`
+  ever arrives.
+- **The real services' HTTP contracts.** The mocks encode what
+  `worker/tasks.py` believes they are. Only the GPU stack can confirm it.
+
+---
+
+## 9. Node-level retry, and coverage for the rest — done (2026-09-16)
+
+### Gap J: the DAG path had silently lost retries
+
+`download_file` carries `autoretry_for=(Exception,), max_retries=3,
+retry_backoff=True`. Same missing file, both routes:
+
+```
+LEGACY  download_file  retry in 1s -> retry in 0s -> retry in 1s -> raised
+DAG     execute_workflow raised TaskExecutionError immediately
+```
+
+Celery's autoretry only engages when a task is *dispatched*. The python
+driver resolves the function and calls it directly, so the body runs but the
+retry machinery never does — the exact case the retry exists for (a flaky S3
+or HTTP fetch) failed the whole job on first attempt. The trap generalises:
+**task decorators are inert on the DAG path.**
+
+Fixed in `DAGEngine`, not on the Celery task, and deliberately so:
+`tasks.execute_workflow` is one Celery task covering the entire DAG, so a
+Celery-level retry would re-run every node — including the GPU ones — to
+recover from one transient download. Retry has to be per node to be useful.
+
+- `settings.retries` sets a workflow default, a node's `retries` attribute
+  overrides it, default 0 (unchanged behaviour).
+- `settings.retry_backoff` / `retry_backoff_max`: doubling delay, capped.
+- A retry re-attempts the whole bracket **including service acquisition**,
+  so a node whose service failed to start gets a fresh cold start rather
+  than the same broken container.
+- Deterministic failures (`PayloadConflictError`) are not retried.
+- `retries` is validated at pre-flight alongside task names.
+
+The shipped workflows declare `retries: 3` on their download node, restoring
+parity with the legacy chain.
+
+### Coverage closed
+
+5 of the 7 job types had only ever run as legacy chains, and
+`speaker_extent`/`segment_extent` had never executed at all. All seven now
+run as registered DAG workflows in `tests/e2e/workflows/`, and
+`callback_url` delivery is verified against a permanently-running mock sink.
+
+### Still not covered
+
+`s3://` downloads, `run_at_ms` ETA scheduling, `DEPLOYMENT_MODE=multi_host`
+end-to-end, `execute_parallel()` in production, and the real services' HTTP
+contracts. Also worth remembering that the mocks were written *from*
+`worker/tasks.py`, so they prove the code self-consistent, not correct: if
+`process_audio` misparses a real response, the mock returns exactly what the
+parser expects.
