@@ -169,4 +169,7 @@ controller, worker, Redis, Celery and Docker-socket orchestration against
 
 The mocks encode what `worker/tasks.py` *believes* the service contracts are.
 Verifying those against the real services is the one thing neither suite can
-do.
+do — see `docs/GPU_TEST_RUNBOOK.md` for the session that does, plus
+`scripts/gpu_preflight.sh` (read-only environment check) and
+`scripts/capture_contracts.py` (captures the real services' responses and
+checks every assumption `worker/tasks.py` makes against them).
