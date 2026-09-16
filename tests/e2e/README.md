@@ -32,6 +32,35 @@ on — no more:
 Plus `GET /__calls`, which returns every request the service has received —
 useful when you want to assert what the worker actually sent.
 
+### They are strict, not permissive
+
+A mock that accepts whatever it is handed cannot catch the bug you most want
+caught: the worker sending a correctly-shaped but wrongly-named field, which
+a real FastAPI endpoint would reject. So the mocks validate and refuse:
+
+- `/generate` requires a matching `X-Admin-Key` and a `client_name`, and
+  issues a *tracked* key, persisted to the shared volume so it survives the
+  worker recreating the container.
+- `/analyze` returns **401** for a missing key or one this service never
+  issued, and **422** for a body that is not multipart or has no part named
+  `video`.
+- `/process_audio/` requires `video_path` (non-empty string), `prompts`, and
+  `chunks` (list or null); **422** otherwise.
+- `/process/` requires `job_id`, `job_type` and `prompts`.
+
+Set `MOCK_LENIENT=1` to fall back to accept-anything behaviour.
+
+The `contract-enforced` scenario proves the guard is awake rather than
+vacuous: it runs a real job (the worker's own requests must pass), then
+sends deliberately malformed requests and asserts each is refused.
+
+This still cannot prove the *real* services have these shapes — only that
+the worker keeps sending what it believes they are. But it turns a silent
+regression into a failing test. It already earned its keep: tightening the
+key check surfaced that `ensure_api_key()` returned its cached key forever,
+so a rotated or forgotten key would have failed every visual job
+permanently, with no recovery path.
+
 ## Injecting failure
 
 The worker cold-starts these containers itself, from the compose file, so a
@@ -80,6 +109,11 @@ never needs them. `run_e2e.py` builds the three images up front.
 | `callback-delivered` | `finalize_results` POSTs its merged output to `callback_url` |
 | `all-job-types` | all 5 remaining legacy job types run as DAGs, incl. `speaker_extent`/`segment_extent` |
 | `custom-name-needs-expects` | a workflow under a name `build_chain()` never knew about runs clean |
+| `contract-enforced` | the mocks refuse malformed requests, and the worker's own requests pass |
+| `stale-api-key-recovered` | a 401 on a cached key triggers regeneration instead of failing forever |
+| `badbody-surfaces` | a non-JSON response fails the job and writes no output |
+| `unhealthy-service` | a service that never goes healthy fails the node rather than hanging |
+| `hung-service` | a service that accepts the connection and never answers hits the request timeout |
 | `unknown-task-preflight` | a typo'd task fails before `download_file` touches the disk |
 
 ## What this found that unit tests could not

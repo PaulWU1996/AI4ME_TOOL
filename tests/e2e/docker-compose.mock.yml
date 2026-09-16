@@ -87,8 +87,14 @@ services:
       - SERVICE_MODES_PATH=/app/tmp/service_modes.json
       # Mocks are healthy in ~2s, not ~5min. Without this every cold start
       # would cost a full 60s poll interval.
-      - HEALTH_CHECK_TIMEOUT=60
+      - HEALTH_CHECK_TIMEOUT=20
       - HEALTH_CHECK_INTERVAL=2
+      # Real defaults are 6000s/1800s. A service that accepts the connection
+      # and then never answers is only testable if the give-up point is
+      # reachable inside a test run.
+      - VISUAL_REQUEST_TIMEOUT=8
+      - AUDIO_REQUEST_TIMEOUT=8
+      - SCRIPT_REQUEST_TIMEOUT=8
     command: celery -A tasks worker --loglevel=info --concurrency=1
     depends_on: [ redis ]
     networks: [ ai_network ]
@@ -115,6 +121,7 @@ services:
       - ./shared/api-data:/app/data
     environment:
       - MOCK_ROLE=visual
+      - MOCK_ADMIN_KEY=mock_admin_password
       - MOCK_STARTUP_DELAY=${MOCK_VISUAL_STARTUP_DELAY:-0}
       - MOCK_LATENCY=${MOCK_VISUAL_LATENCY:-0}
       - MOCK_FAIL_MODE=${MOCK_VISUAL_FAIL_MODE:-}

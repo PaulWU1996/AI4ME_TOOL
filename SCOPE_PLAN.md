@@ -18,9 +18,10 @@ what's scoped-but-not-started, and what blocks what.
 | 5. Multi-instance service pooling / orchestrator migration | **Explicitly deferred, not scoped** — decided 2026-09-09, see note below |
 | 3b. Deployment-mode split: readiness strategy (single-host vs multi-host) | **Done** — implemented 2026-09-11, see §3b below |
 | 6. Docker-free unit suite for `dag/` | **Done** — 2026-09-16, 155 tests; see §6 for the 8 gaps it surfaced |
-| 7. Mock-service e2e stack | **Done** — 2026-09-16, 16 scenarios; see §7 and §9 |
+| 7. Mock-service e2e stack | **Done** — 2026-09-16, 21 scenarios; see §7, §9 and §10 |
 | 8. Gaps A-I closed | **Done** — 2026-09-16, see §8 |
 | 9. Node-level retry + coverage of every job type | **Done** — 2026-09-16, see §9 |
+| 10. Strict mock contracts + failure-mode coverage | **Done** — 2026-09-16, 21 scenarios; see §10 |
 
 ---
 
@@ -641,3 +642,52 @@ contracts. Also worth remembering that the mocks were written *from*
 `worker/tasks.py`, so they prove the code self-consistent, not correct: if
 `process_audio` misparses a real response, the mock returns exactly what the
 parser expects.
+
+---
+
+## 10. Strict mock contracts — done (2026-09-16)
+
+The mocks were permissive: they checked that an API key header was *present*,
+not that it was valid, and accepted any multipart body regardless of the part
+name. A mock that accepts whatever it is handed cannot catch the bug you most
+want caught — the worker sending something a real FastAPI endpoint would
+refuse. They now validate and reject (`MOCK_LENIENT=1` restores the old
+behaviour), and the `contract-enforced` scenario proves the guard is awake by
+sending deliberately malformed requests and asserting each is refused.
+
+### Gap K: the API key could never recover
+
+Tightening the key check immediately surfaced a real one.
+`utils.ensure_api_key()` returned the cached key from `api.key`
+unconditionally. If the visual service ever forgot or rotated its keys — its
+store is `shared/api-data`, wiped by any volume reset — the worker would
+present the same dead key on every subsequent job, and **visual analysis
+would fail permanently with no recovery path**. Nothing in the system would
+regenerate it.
+
+Fixed: `ensure_api_key(force=True)` bypasses the cache, and `process_visual`
+regenerates and retries once on a 401/403. Pinned by
+`stale-api-key-recovered`.
+
+### Failure modes that were implemented but never exercised
+
+`badbody`, `unhealthy` and `timeout` existed in the mock and no scenario used
+them. All three now have scenarios:
+
+- **badbody** — a service returning HTML or a truncated body fails the job and
+  writes no output file, rather than persisting a corrupt one.
+- **unhealthy** — a container that never reports healthy makes the cold start
+  give up and fail the node instead of hanging.
+- **timeout** — a service that accepts the connection and never answers. This
+  was previously *untestable*: the request timeouts were hardcoded at
+  1800-6000s, so the worker would block for up to half an hour on a hung GPU
+  service. `VISUAL_REQUEST_TIMEOUT` / `AUDIO_REQUEST_TIMEOUT` /
+  `SCRIPT_REQUEST_TIMEOUT` make the give-up point configurable, defaults
+  unchanged.
+
+### What this still cannot do
+
+Prove the real services have these shapes. The mocks encode what
+`worker/tasks.py` believes; strictness means the worker can no longer drift
+from that belief unnoticed, but if the belief itself is wrong, only the GPU
+stack will say so.

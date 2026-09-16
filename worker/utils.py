@@ -106,40 +106,52 @@ def save_to_disk(job_id, filename, data):
         json.dump(data, f, indent=4, ensure_ascii=False)
 
 
-def ensure_api_key(api_dir=api_key_path, admin_key=visual_api_admin_key):  # change the api_dir
+def ensure_api_key(api_dir=api_key_path, admin_key=visual_api_admin_key, force=False):
+    """Return the visual service's API key, generating one if needed.
+
+    force=True skips the cache and mints a fresh key. Without it the cached
+    key is returned forever, so if the service ever forgets or rotates its
+    keys -- its store lives in shared/api-data, which any volume reset wipes
+    -- the worker would keep presenting a dead key and every visual job would
+    fail permanently with no way to recover. process_visual passes force=True
+    after a 401/403 and retries once.
+    """
     key_file_path = os.path.join(api_dir, "api.key")
 
-    if os.path.exists(key_file_path):
+    if not force and os.path.exists(key_file_path):
         with open(key_file_path, "r") as f:
             existing_key = f.read().strip()
-            if existing_key:
-                print(f"[Key Manager] API key already exists: {existing_key}")
-                return existing_key
-    else:
-        print(f"[Key Manager] API key file not found. Creating new key at {key_file_path}")
-        gen_url = visual_api_url + "/generate"
-        headers = {"X-Admin-Key": admin_key, "Content-Type": "application/json"}
-        payload = {"client_name": "client_ai4me", "expire_in_days": 365}
+        if existing_key:
+            print(f"[Key Manager] API key already exists: {existing_key}")
+            return existing_key
 
-        try:
-            response = requests.post(gen_url, headers=headers, json=payload, timeout=30)
-            response.raise_for_status()
+    reason = "forced regeneration" if force else "no usable cached key"
+    print(f"[Key Manager] {reason}; requesting a new key at {key_file_path}")
 
-            data = response.json()
-            new_key = data.get("api_key")
+    gen_url = visual_api_url + "/generate"
+    headers = {"X-Admin-Key": admin_key, "Content-Type": "application/json"}
+    payload = {"client_name": "client_ai4me", "expire_in_days": 365}
 
-            if not new_key:
-                raise ValueError(f"Failed to obtain API key from visual service: {data}")
-            with open(key_file_path, "w") as f:
-                f.write(new_key)
-            print(f"[Key Manager] Generated and saved new API key: {new_key}")
+    try:
+        response = requests.post(gen_url, headers=headers, json=payload, timeout=30)
+        response.raise_for_status()
 
-            os.chmod(key_file_path, 0o644)
-            return new_key
+        data = response.json()
+        new_key = data.get("api_key")
 
-        except Exception as e:
-            print(f"[Key Manager] Error ensuring API key: {str(e)}")
-            return None
+        if not new_key:
+            raise ValueError(f"Failed to obtain API key from visual service: {data}")
+
+        os.makedirs(api_dir, exist_ok=True)
+        with open(key_file_path, "w") as f:
+            f.write(new_key)
+        os.chmod(key_file_path, 0o644)
+        print(f"[Key Manager] Generated and saved new API key: {new_key}")
+        return new_key
+
+    except Exception as e:
+        print(f"[Key Manager] Error ensuring API key: {str(e)}")
+        return None
 
 
 def extract_flat_captions(xml_body):

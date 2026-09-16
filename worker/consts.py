@@ -46,3 +46,12 @@ transcript_text_file = "transcript.txt"
 # instead of spending a minute per cold start.
 HEALTH_CHECK_TIMEOUT = int(os.getenv("HEALTH_CHECK_TIMEOUT", "330"))
 HEALTH_CHECK_INTERVAL = int(os.getenv("HEALTH_CHECK_INTERVAL", "60"))
+
+# How long to wait on a service's HTTP response before giving up. Sized for
+# real GPU inference; env-overridable so a hung service is testable in
+# seconds rather than half an hour. A service that accepts a connection and
+# then never answers is a realistic failure, and without a reachable timeout
+# the worker blocks on it for the full budget.
+VISUAL_REQUEST_TIMEOUT = int(os.getenv("VISUAL_REQUEST_TIMEOUT", "6000"))
+AUDIO_REQUEST_TIMEOUT = int(os.getenv("AUDIO_REQUEST_TIMEOUT", "1800"))
+SCRIPT_REQUEST_TIMEOUT = int(os.getenv("SCRIPT_REQUEST_TIMEOUT", "1800"))

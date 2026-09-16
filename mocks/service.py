@@ -48,6 +48,20 @@ SEGMENTS = int(os.getenv("MOCK_SEGMENTS", "3"))
 # it. A file on the shared volume survives that, and is re-read per request.
 CONTROL_PATH = os.getenv("MOCK_CONTROL_PATH", "/app/tmp/mock_control.json")
 
+# Keys issued by POST /generate, persisted on the shared volume. The worker
+# caches its key in /app/data/api.key and reuses it across jobs, while these
+# containers are destroyed and recreated per cold start -- so an in-memory
+# record would reject a key this service itself issued ten seconds earlier.
+ISSUED_KEYS_PATH = os.getenv("MOCK_ISSUED_KEYS_PATH", "/app/tmp/mock_issued_keys.json")
+
+ADMIN_KEY = os.getenv("MOCK_ADMIN_KEY", "mock_admin_password")
+
+# Strict by default: reject anything the real service would reject, so a
+# malformed request from the worker fails here instead of silently passing a
+# permissive stub and only surfacing against the real GPU stack. Set
+# MOCK_LENIENT=1 to fall back to accept-anything behaviour.
+STRICT = os.getenv("MOCK_LENIENT", "") != "1"
+
 BOOTED_AT = time.monotonic()
 CALLS = []          # every request, so a test can assert what the worker sent
 CALLS_LOCK = threading.Lock()
@@ -73,6 +87,24 @@ def fail_mode():
 
 def latency():
     return float(control("latency", LATENCY))
+
+
+def _load_issued_keys():
+    try:
+        with open(ISSUED_KEYS_PATH) as f:
+            return set(json.load(f))
+    except (FileNotFoundError, ValueError, TypeError):
+        return set()
+
+
+def _remember_issued_key(key):
+    keys = _load_issued_keys()
+    keys.add(key)
+    try:
+        with open(ISSUED_KEYS_PATH, "w") as f:
+            json.dump(sorted(keys), f)
+    except OSError as e:
+        log(f"could not persist issued key: {e}")
 
 
 def is_ready():
@@ -183,6 +215,70 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
         log(f"{self.command} {self.path} -> {args[1] if len(args) > 1 else ''}")
 
+    # -- contract enforcement ----------------------------------------------
+
+    def _reject(self, violations):
+        """Answer like FastAPI would when a request does not match the
+        declared signature. Returns True if the request was rejected."""
+        if not violations or not STRICT:
+            if violations:
+                log(f"LENIENT: would have rejected: {violations}")
+            return False
+        log(f"REJECTED: {violations}")
+        self._send(422, {"detail": [{"msg": v} for v in violations]})
+        return True
+
+    def _check_analyze_key(self):
+        """Auth is separate from body validation: a stale key has to come back
+        as 401 so the caller can tell 'regenerate and retry' apart from
+        'your request is malformed'."""
+        key = self.headers.get("X-API-Key")
+        if not key:
+            return "X-API-Key header is required"
+        if STRICT and key not in _load_issued_keys():
+            return f"X-API-Key {key!r} was never issued by /generate"
+        return None
+
+    def _check_analyze(self, body):
+        """POST /analyze: the upload must carry a part named `video` -- a real
+        FastAPI endpoint declaring `video: UploadFile = File(...)` 422s on any
+        other name."""
+        violations = []
+        content_type = self.headers.get("Content-Type", "")
+        if not content_type.startswith("multipart/form-data"):
+            violations.append(f"expected multipart/form-data, got {content_type!r}")
+        elif b'name="video"' not in body:
+            violations.append('multipart body has no part named "video"')
+        if not body:
+            violations.append("empty request body")
+        return violations
+
+    def _check_process_audio(self, parsed):
+        violations = []
+        if not isinstance(parsed, dict):
+            return ["body must be a JSON object"]
+        if not isinstance(parsed.get("video_path"), str) or not parsed.get("video_path"):
+            violations.append("'video_path' must be a non-empty string")
+        if "prompts" not in parsed:
+            violations.append("'prompts' key is required (may be null)")
+        if "chunks" not in parsed:
+            violations.append("'chunks' key is required (may be null)")
+        elif parsed["chunks"] is not None and not isinstance(parsed["chunks"], list):
+            violations.append("'chunks' must be a list or null")
+        return violations
+
+    def _check_process(self, parsed):
+        violations = []
+        if not isinstance(parsed, dict):
+            return ["body must be a JSON object"]
+        if not isinstance(parsed.get("job_id"), str) or not parsed.get("job_id"):
+            violations.append("'job_id' must be a non-empty string")
+        if "job_type" not in parsed:
+            violations.append("'job_type' key is required")
+        if "prompts" not in parsed:
+            violations.append("'prompts' key is required (may be null)")
+        return violations
+
     # -- failure injection -------------------------------------------------
 
     def _maybe_fail(self):
@@ -224,26 +320,45 @@ class Handler(BaseHTTPRequestHandler):
 
         # Visual service ---------------------------------------------------
         if path == "/generate":
-            if not self.headers.get("X-Admin-Key"):
+            admin = self.headers.get("X-Admin-Key")
+            if not admin:
                 return self._send(401, {"detail": "X-Admin-Key required"})
-            return self._send(200, {"api_key": "mock-api-key-0123456789"})
+            if STRICT and admin != ADMIN_KEY:
+                return self._send(403, {"detail": "X-Admin-Key is not valid"})
+            try:
+                parsed = json.loads(body or b"{}")
+            except ValueError:
+                parsed = {}
+            if self._reject([] if isinstance(parsed, dict) and parsed.get("client_name")
+                            else ["'client_name' is required"]):
+                return
+            key = f"mock-api-key-{abs(hash(parsed.get('client_name'))) % 10**10:010d}"
+            _remember_issued_key(key)
+            log(f"issued api key {key}")
+            return self._send(200, {"api_key": key})
 
         if path == "/analyze":
+            auth_problem = self._check_analyze_key()
+            if auth_problem:
+                log(f"REJECTED (401): {auth_problem}")
+                return self._send(401, {"detail": auth_problem})
+            if self._reject(self._check_analyze(body)):
+                return
             if self._maybe_fail():
                 return
-            if not self.headers.get("X-API-Key"):
-                return self._send(401, {"detail": "X-API-Key required"})
             log(f"/analyze received {len(body)} bytes of multipart video")
             return self._send(200, visual_xml(), "application/xml")
 
         # Audio service ----------------------------------------------------
         if path == "/process_audio":
-            if self._maybe_fail():
-                return
             try:
                 parsed = json.loads(body or b"{}")
             except ValueError:
-                return self._send(400, {"detail": "body was not JSON"})
+                return self._send(422, {"detail": "body was not JSON"})
+            if self._reject(self._check_process_audio(parsed)):
+                return
+            if self._maybe_fail():
+                return
             log(f"/process_audio video_path={parsed.get('video_path')} "
                 f"chunks={len(parsed.get('chunks') or [])}")
             return self._send(200, audio_json())
@@ -258,12 +373,14 @@ class Handler(BaseHTTPRequestHandler):
 
         # Transcript / tagging services -------------------------------------
         if path == "/process":
-            if self._maybe_fail():
-                return
             try:
                 parsed = json.loads(body or b"{}")
             except ValueError:
-                parsed = {}
+                return self._send(422, {"detail": "body was not JSON"})
+            if self._reject(self._check_process(parsed)):
+                return
+            if self._maybe_fail():
+                return
             payload = transcript_json(parsed) if ROLE == "transcript" else tagging_json(parsed)
             return self._send(200, payload)
 

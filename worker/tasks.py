@@ -13,6 +13,9 @@ from consts import (
     summarise_api_url,
     tagging_api_url,
     transcript_text_file,
+    VISUAL_REQUEST_TIMEOUT,
+    AUDIO_REQUEST_TIMEOUT,
+    SCRIPT_REQUEST_TIMEOUT,
 )
 from utils import (
     ensure_api_key,
@@ -117,11 +120,29 @@ def process_visual(payload):
         if not os.path.exists(file_path):
             raise FileNotFoundError(f"File not found: {file_path}")
 
-        headers = {"X-API-Key": api_key}
         analyze_url = visual_api_url + "/analyze"
-        # TODO: pass prompts to the service
-        with open(file_path, "rb") as f:
-            response = requests.post(analyze_url, headers=headers, files={"video": f}, timeout=6000)
+
+        def post_analyze(key):
+            # TODO: pass prompts to the service
+            with open(file_path, "rb") as f:
+                return requests.post(
+                    analyze_url,
+                    headers={"X-API-Key": key},
+                    files={"video": f},
+                    timeout=VISUAL_REQUEST_TIMEOUT,
+                )
+
+        response = post_analyze(api_key)
+
+        if response.status_code in (401, 403):
+            # The cached key is stale -- the service has forgotten or rotated
+            # it. Without this the worker would present the same dead key on
+            # every future job, and visual analysis would never recover.
+            print(f"[Visual Worker] API key rejected ({response.status_code}); regenerating.")
+            api_key = ensure_api_key(force=True)
+            if not api_key:
+                raise RuntimeError("Failed to regenerate API key for visual service")
+            response = post_analyze(api_key)
 
         response.raise_for_status()
         visual_result = extract_flat_captions(response.text)
@@ -162,7 +183,7 @@ def process_audio(payload):  # change filepath to dict inputs
             "chunks": payload.get("visual_result"),  # visual segment boundaries for chunk splitting
         }
 
-        response = requests.post(audio_api_url, json=audio_payload, timeout=1800)
+        response = requests.post(audio_api_url, json=audio_payload, timeout=AUDIO_REQUEST_TIMEOUT)
 
         if response.status_code != 200:
             try:
@@ -366,7 +387,7 @@ def run_service_task(
                 "job_type": "script",
                 "prompts": payload.get("prompts"),
             },
-            timeout=1800,
+            timeout=SCRIPT_REQUEST_TIMEOUT,
         )
         response.raise_for_status()
 

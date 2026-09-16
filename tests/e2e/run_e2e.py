@@ -28,6 +28,8 @@ COMPOSE_FILE = os.path.join("tests", "e2e", "docker-compose.mock.yml")
 PROJECT = "ai4me_mock"
 CONTROLLER = "http://localhost:19000"
 CALLBACK_SINK = "http://localhost:19005"
+VISUAL_SINK = "http://localhost:19001"
+AUDIO_SINK = "http://localhost:19002"
 # As the worker sees it, on the compose network.
 CALLBACK_URL = "http://callbacksink:8000/callback"
 WORKFLOWS_DIR = os.path.join(REPO, "tests", "e2e", "workflows")
@@ -178,6 +180,14 @@ def reset_registry():
     for entry in os.listdir(WORKFLOWS_DIR):
         if entry.endswith(".json") and entry != "registry.json" and entry not in seeded:
             os.remove(os.path.join(WORKFLOWS_DIR, entry))
+
+
+def clean_api_key():
+    """The worker caches its visual-service key in data/api.key, which
+    survives a shared-volume wipe. Clearing it keeps runs reproducible."""
+    key_path = os.path.join(DATA_DIR, "api.key")
+    if os.path.exists(key_path):
+        os.remove(key_path)
 
 
 def clean_shared():
@@ -461,6 +471,131 @@ def scenario_slow_startup(ctx):
         set_mock_control({})
 
 
+@scenario("contract-enforced", "the mocks reject what the real services would reject")
+def scenario_contract(ctx):
+    """The mocks validate request shape rather than accepting anything, so a
+    regression in how worker/tasks.py builds a request fails here instead of
+    only against the real GPU stack.
+
+    First prove the worker's real requests pass, then prove the guard is
+    actually awake by sending it deliberately malformed ones.
+    """
+    job_id = submit(ctx["video"], job_type="full")
+    result = poll_job(job_id)
+    assert result["status"] == "SUCCESS", f"worker's own requests were rejected: {result}"
+
+    # Keep the services up so they can be probed directly.
+    compose("up", "-d", "visualservice", "audioservice")
+    time.sleep(4)
+
+    probes = [
+        ("no api key", "POST", f"{VISUAL_SINK}/analyze", None, 401),
+        ("bad audio body", "POST", f"{AUDIO_SINK}/process_audio/", {"nope": 1}, 422),
+        ("audio missing chunks", "POST", f"{AUDIO_SINK}/process_audio/",
+         {"video_path": "j/v.mp4", "prompts": None}, 422),
+        ("audio wrong chunks type", "POST", f"{AUDIO_SINK}/process_audio/",
+         {"video_path": "j/v.mp4", "prompts": None, "chunks": "not-a-list"}, 422),
+    ]
+    try:
+        for label, method, url, body, expected in probes:
+            status, response = http(method, url, body, timeout=10)
+            assert status == expected, f"{label}: expected {expected}, got {status} {response}"
+
+        # And a well-formed audio request is still accepted, so the guard is
+        # not simply rejecting everything.
+        status, response = http("POST", f"{AUDIO_SINK}/process_audio/",
+                                {"video_path": "j/v.mp4", "prompts": None, "chunks": None})
+        assert status == 200, (status, response)
+        assert "output" in response, response
+    finally:
+        for name in ("visualservice", "audioservice"):
+            compose("stop", name, check=False)
+            compose("rm", "-f", name, check=False)
+
+    return f"{len(probes)} malformed requests rejected, well-formed one accepted"
+
+
+@scenario("stale-api-key-recovered", "a rejected API key is regenerated rather than failing forever")
+def scenario_stale_key(ctx):
+    """ensure_api_key() used to return the cached key unconditionally, so if
+    the visual service ever forgot or rotated its keys -- its store lives in
+    shared/api-data, which any volume reset wipes -- the worker would present
+    the same dead key on every future job and visual analysis would never
+    recover. Found by tightening the mock to reject keys it never issued.
+    """
+    # Prime the cache, then poison it with a key the service will not accept.
+    key_path = os.path.join(DATA_DIR, "api.key")
+    with open(key_path, "w") as f:
+        f.write("stale-key-from-a-previous-deployment")
+
+    marker = worker_log_mark()
+    job_id = submit(ctx["video"], job_type="full")
+    result = poll_job(job_id)
+
+    assert result["status"] == "SUCCESS", f"worker did not recover from a stale key: {result}"
+    log = worker_log_since(marker)
+    assert "API key rejected" in log, "expected the 401 recovery path to be taken"
+    with open(key_path) as f:
+        assert f.read().strip() != "stale-key-from-a-previous-deployment", "key was not replaced"
+    return "401 on a stale key triggered regeneration and the job completed"
+
+
+@scenario("badbody-surfaces", "a service returning non-JSON fails the job instead of corrupting it")
+def scenario_badbody(ctx):
+    """A real service returning an HTML error page or a truncated response is
+    a realistic failure the parser had never seen."""
+    set_mock_control({"audio": {"fail_mode": "badbody"}})
+    try:
+        job_id = submit(ctx["video"], job_type="full")
+        result = poll_job(job_id)
+        assert result["status"] == "FAILURE", result
+        files = workspace_files(job_id)
+        assert not any(f.endswith("_audio_output.json") for f in files), \
+            f"a corrupt response produced an audio output file: {files}"
+        return "non-JSON response failed the job and wrote no output"
+    finally:
+        set_mock_control({})
+
+
+@scenario("unhealthy-service", "a service that never becomes healthy fails the node")
+def scenario_unhealthy(ctx):
+    for name in ("visualservice",):
+        compose("stop", name, check=False)
+        compose("rm", "-f", name, check=False)
+    set_mock_control({"visual": {"fail_mode": "unhealthy"}})
+    try:
+        job_id = submit(ctx["video"], job_type="full")
+        result = poll_job(job_id, timeout=240)
+        assert result["status"] == "FAILURE", result
+        message = str(result.get("message", "")).lower()
+        assert "visualservice" in message, result
+        return "cold start gave up and failed the node rather than hanging"
+    finally:
+        set_mock_control({})
+        compose("stop", "visualservice", check=False)
+        compose("rm", "-f", "visualservice", check=False)
+
+
+@scenario("hung-service", "a service that accepts the connection and never answers")
+def scenario_hung(ctx):
+    """Without a reachable request timeout the worker blocks for the full
+    30-minute budget on this. VISUAL/AUDIO_REQUEST_TIMEOUT make the give-up
+    point configurable; the mock stack sets them to 8s."""
+    set_mock_control({"audio": {"fail_mode": "timeout"}})
+    try:
+        started = time.time()
+        job_id = submit(ctx["video"], job_type="full")
+        result = poll_job(job_id, timeout=180)
+        elapsed = time.time() - started
+        assert result["status"] == "FAILURE", result
+        assert elapsed < 120, f"took {elapsed:.0f}s — the request timeout did not fire"
+        return f"gave up on the hung service after {elapsed:.0f}s"
+    finally:
+        set_mock_control({})
+        compose("stop", "audioservice", check=False)
+        compose("rm", "-f", "audioservice", check=False)
+
+
 @scenario("coldstart-cycle", "the worker really starts and stops containers over the Docker socket")
 def scenario_coldstart(ctx):
     for name in ("visualservice", "audioservice"):
@@ -625,6 +760,7 @@ def main():
     tear_down()
     reset_registry()
     clean_shared()
+    clean_api_key()
     bring_up()
 
     selected = [s for s in SCENARIOS if not args.filter or args.filter in s[0]]
