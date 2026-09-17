@@ -1,0 +1,18 @@
+[
+  {
+    "level": "ok",
+    "message": "GET /health/ -> 200 (worker's healthcheck path)"
+  },
+  {
+    "level": "ok",
+    "message": "POST /api/keys/generate returned an 'api_key'"
+  },
+  {
+    "level": "ok",
+    "message": "POST /analyze -> 200, 23098 bytes, Content-Type=None"
+  },
+  {
+    "level": "warn",
+    "message": "xmltodict not installed here; skipping XML shape check (pip install xmltodict)"
+  }
+]

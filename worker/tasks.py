@@ -95,7 +95,15 @@ def download_file(self, path, job_id, prompts=None):
             raise ValueError(f"Unsupported or missing path: {path}")
 
         print(f"[Downloader] File ready at {dest}")
-        return {"file_path": dest, "job_id": job_id, "prompts": prompts}
+        return {
+            "file_path": dest,
+            # Relative to the shared volume root, as audioservice's own
+            # /process_audio/ expects it -- lets an http-driver node forward
+            # this payload directly with no service-specific field mapping.
+            "video_path": f"{job_id}/{filename}",
+            "job_id": job_id,
+            "prompts": prompts,
+        }
     except Exception:
         shutil.rmtree(output_dir, ignore_errors=True)
         raise
@@ -547,13 +555,17 @@ def execute_workflow(self, workflow_path, job_id, path, prompts=None, job_type="
         retry_backoff=parser.settings.get("retry_backoff", 1.0),
         retry_backoff_max=parser.settings.get("retry_backoff_max", 60.0),
     )
-    # Sequential by default. execute_parallel() is now safe as far as
-    # service occupancy goes — dag/readiness.py leases refcount holders and
-    # cap concurrency per service — but enabling it still needs an aggregate
-    # resource-feasibility check, since a lease stops one service being
-    # doubly occupied without stopping two *different* GPU services being
-    # jointly resident beyond host VRAM.
-    engine.execute()
+    # Sequential by default. execute_parallel() is safe as far as service
+    # occupancy goes -- dag/readiness.py leases refcount holders and cap
+    # concurrency per service -- but running two *different* GPU services
+    # concurrently also needs their combined VRAM to actually fit the host,
+    # which a lease alone doesn't check. A workflow opts in per-template via
+    # `settings.parallel: true` once its nodes' GPU footprints are known to
+    # coexist (e.g. pinned to separate devices).
+    if parser.settings.get("parallel", False):
+        engine.execute_parallel()
+    else:
+        engine.execute()
 
     # Per-node envelopes go to the workspace rather than into the task
     # result, so /status returns the same shape for DAG jobs as it does for

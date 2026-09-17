@@ -1,0 +1,30 @@
+[
+  {
+    "level": "ok",
+    "message": "GET /health/ -> 200 (worker's healthcheck path)"
+  },
+  {
+    "level": "ok",
+    "message": "POST /api/keys/generate returned an 'api_key'"
+  },
+  {
+    "level": "ok",
+    "message": "POST /analyze -> 200, 2036 bytes, Content-Type=None"
+  },
+  {
+    "level": "ok",
+    "message": "3 segments with StartTime/EndTime/Description"
+  },
+  {
+    "level": "ok",
+    "message": "GET /health/ -> 200"
+  },
+  {
+    "level": "ok",
+    "message": "output[0]['start']='00:00:00,000' splits on ',' as expected"
+  },
+  {
+    "level": "ok",
+    "message": "output[0]['end']='00:00:20,010' splits on ',' as expected"
+  }
+]

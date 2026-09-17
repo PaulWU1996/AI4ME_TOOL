@@ -13,8 +13,8 @@ what's scoped-but-not-started, and what blocks what.
 | 2b. `settings.on_failure` actually wired (bonus fix found along the way) | **Done** |
 | 3. Service lifecycle + auth generalization | **Lifecycle done** — readiness (§3b) + leases (§8) shipped, task bodies migrated off `start_service`/`stop_service`; `auth` field/injection still not started |
 | 4. Retire `build_chain()` / legacy Celery chains | **Not started** — blocks the rest of #2, and most of #3 |
-| Live `docker-compose up --build` verification | **Done against mocks** — 2026-09-16, §7. Found and fixed a `PYTHONPATH` bug that had made the DAG path unrunnable. Not yet run against the real GPU services |
-| `execute_parallel()` enablement | **Unblocked on occupancy** — leases shipped (§8). Still gated on an aggregate VRAM feasibility check before it is switched on |
+| Live `docker-compose up --build` verification | **Done against mocks** (2026-09-16, §7) **and against the real GPU stack** (2026-09-17, §11) |
+| `execute_parallel()` enablement | **Wired and validated for one workflow** — 2026-09-17, §11. `execute_workflow` now honors `settings.parallel`; proven with genuine concurrent execution on two GPU-pinned services. Still **not** enabled for the production `full_pipeline` template (its nodes self-manage lifecycle, per §3's sequencing note), and still no *coded* aggregate-VRAM feasibility check — §11's validation is a manual, host-specific GPU pinning, not a portable safety check |
 | 5. Multi-instance service pooling / orchestrator migration | **Explicitly deferred, not scoped** — decided 2026-09-09, see note below |
 | 3b. Deployment-mode split: readiness strategy (single-host vs multi-host) | **Done** — implemented 2026-09-11, see §3b below |
 | 6. Docker-free unit suite for `dag/` | **Done** — 2026-09-16, 155 tests; see §6 for the 8 gaps it surfaced |
@@ -22,6 +22,7 @@ what's scoped-but-not-started, and what blocks what.
 | 8. Gaps A-I closed | **Done** — 2026-09-16, see §8 |
 | 9. Node-level retry + coverage of every job type | **Done** — 2026-09-16, see §9 |
 | 10. Strict mock contracts + failure-mode coverage | **Done** — 2026-09-16, 21 scenarios; see §10 |
+| 11. Real-GPU contract validation (`GPU_TEST_RUNBOOK.md` Phases 1-3, 5) | **Done** — 2026-09-17, see §11. Phase 4 (`summarise`/`tagging`) still blocked on `transcriptservice`/`taggingservice` images not being available on this host |
 
 ---
 
@@ -388,12 +389,15 @@ or an equivalent, and the routing logic that currently falls back to
 
 ## Verification gap
 
-Nothing in this document has been run against a live `docker-compose up
---build` stack with real Redis/Celery/Docker-orchestrated services. All
-verification so far is syntax checks, simulated image-layout imports, and
-dry runs with stub functions standing in for the real ones. This is the
-natural next step whenever it's convenient to run the full stack — and
-arguably should happen before relying further on anything in section 3.
+**Updated 2026-09-17, see §11.** Sections 1-3b below were originally
+verified only by syntax checks, simulated image-layout imports, and dry
+runs with stub functions — this note recorded that gap. §7 later closed it
+against mocks, and §11 closed it against the real GPU stack. What §11 did
+*not* verify: §3's `auth` field/service-registry design (superseded, for
+the http driver specifically, by §11's static-context decision — §3's
+config-schema approach is still unimplemented) and `execute_parallel()`
+for the production `full_pipeline` template (§11 validated a new,
+separate workflow, not a retrofit of `process_visual`/`process_audio`).
 
 ---
 
@@ -691,3 +695,161 @@ Prove the real services have these shapes. The mocks encode what
 `worker/tasks.py` believes; strictness means the worker can no longer drift
 from that belief unnoticed, but if the belief itself is wrong, only the GPU
 stack will say so.
+
+---
+
+## 11. Real-GPU contract validation — done (2026-09-17)
+
+The gap every prior section flagged and could not close: `tests/e2e/`
+proves the orchestration self-consistent, not correct, because
+`mocks/service.py` was written *from* `worker/tasks.py`'s own beliefs about
+the real contracts. This session ran `docs/GPU_TEST_RUNBOOK.md` against the
+actual `narrative-api`/`audioservice` images on a 2×A5000 + 1×T400 host and
+checked those beliefs against reality. Full raw evidence in `contracts/`.
+
+### Bugs found and fixed in this repo
+
+- `visualservice`'s Docker healthcheck used `curl`; the real image has
+  neither `curl` nor `wget`, only `python3` — the check could never pass,
+  so a cold start always ran out the full `HEALTH_CHECK_TIMEOUT`. Switched
+  to a `python3 urllib` check.
+- The worker's nested `docker compose` calls (used to start on-demand
+  services over the Docker socket) run inside the worker's own container
+  filesystem, which cannot see the host's `.env` — so `AI4ME_ADMIN_PASSWORD`
+  silently resolved to `""` when starting `visualservice`, even though the
+  worker's *own* copy of the password (baked in at the outer `docker compose
+  up`) was correct. The two silently diverged. Fixed by also forwarding
+  `AI4ME_ADMIN_PASSWORD` itself into the worker's env, so the nested compose
+  process inherits it directly.
+- `ensure_api_key()` (`worker/utils.py`) and `capture_contracts.py` both
+  called `POST /generate`; the real endpoint is `/api/keys/generate` and
+  requires a `client_name` in the body. The wrong path 404'd, which
+  `process_visual` correctly treated as key-acquisition failure — this one
+  never silently corrupted output, it just always failed.
+- `audioservice`'s `MODEL_PATH` had a typo (`PPALUniEnc...`, doubled `P`)
+  that has apparently been present since this env var was written — the
+  model never loaded, `/health/` correctly reported 503 forever.
+- `audioservice`'s ~8B-parameter model, under HuggingFace's
+  `device_map="auto"` balancing, would place layers on whatever GPUs are
+  visible regardless of size — with `count: all` it landed some layers on
+  a 4GB T400 (OOM instantly), and splitting across the two 24GB A5000s hit
+  a genuine bug in the model's own custom code (a `torch.cat` mixing
+  tensors still on `cuda:0` and `cuda:1` without moving them first). Pinned
+  to a single GPU (`device_ids: ["0"]`) — its ~18GB footprint fits one
+  A5000 comfortably.
+- `visualservice` defaulted to plain `"cuda"` (device 0 as it sees it) and,
+  with `count: all`, silently shared that same physical GPU with
+  `audioservice` whenever both were resident (`keepalive`, or any overlap
+  on the DAG path) — leaving ~1.9GB free, not enough for its own inference.
+  The failure was invisible: HTTP 200, valid XML, just every segment's
+  `<Description>` replaced with `"Error processing frames from Xs to Ys"`
+  by the model's own broad exception handler. Pinned to `device_ids:
+  ["1"]`, a separate A5000. Confirmed by direct reproduction (stopping
+  `audioservice` alone fixed an already-running, never-restarted
+  `visualservice` container), not just by re-running until it passed.
+- `config/services.json`'s `vram_mb` estimates replaced with real measured
+  deltas from `scripts/start_services.py`'s keepalive calibration pass
+  (`audioservice` 8000→18281MB, `visualservice` 6000→3890MB) — the
+  self-calibration behaviour already documented in `CLAUDE.md` working as
+  intended, exercised for the first time against real weights.
+- `scripts/start_services.py` needs the `docker` Python SDK, which is only
+  ever installed inside the worker's container image — a real, previously
+  unexercised host-side dependency gap (this script had apparently never
+  been run against a real host before).
+- Confirmed operationally, not fixed in code: editing `docker-compose.yml`
+  on the host does not propagate into the worker container until it is
+  force-recreated (`docker compose up -d --force-recreate worker`) — a
+  single-file bind mount is pinned to the inode that existed at container
+  creation, and a plain edit-in-place replaces that inode. Same root cause
+  bit `service_modes.json`: `start_services.py`'s own `compose up --build
+  -d ... worker` at the end of a `--keepalive` run does **not** force a
+  recreate when Compose sees no service-definition diff, so keepalive mode
+  can silently have no effect if the worker was already running — the
+  documented "worker must be restarted after changing modes" caveat is
+  real, and not automatically satisfied by the tooling meant to do it.
+
+### Bugs found and fixed in the external images (not this repo)
+
+Both confirmed via direct inspection of the running container's own
+`/app` source, and both since fixed in supplied replacement images,
+re-verified against `contracts/20260917-160359/`:
+
+- `narrative-api` (`visualservice`): every single `/analyze` call hit an
+  unconditional `KeyError: 'audio_description'` inside
+  `enhanced_segment_merger.py`'s `generate_enhanced_xml` — the segment-
+  building code never set that key, but the XML serializer required it on
+  every segment. Caught internally and returned as a 200-status
+  `<Error>...</Error>` body, so nothing on the worker side ever saw a
+  failure; `extract_flat_captions` just found no `VideoAnalysis` root and
+  returned `[]`. **Every real `full` job would have silently produced empty
+  visual output**, forever, with no error anywhere.
+- `audioservice`: `run_inference_on_video`'s `finally` block did
+  `shutil.rmtree(task_tmp_dir)`, where `task_tmp_dir` is the **entire
+  shared job directory** (`/app/tmp/{job_id}`), not just the `wavs/`
+  subfolder it created — wiping out `process_visual`'s already-written
+  output (and the original video) as a side effect of "cleaning up" after
+  itself. **With the legacy `full` chain's visual-then-audio ordering, this
+  meant the `full` job type could never succeed** — `finalize_results`
+  would always report visual missing, regardless of video length or
+  anything in this repo.
+
+### New capability: HTTP-driver parallel pipeline
+
+Built to directly test genuine concurrent GPU-service use once the two
+device-pinning fixes above made it VRAM-safe on this host:
+
+- `dag/drivers/http.py` — added `file_field`/`file_path_key` support for
+  multipart uploads, so the generic driver can call an endpoint that takes
+  a raw upload (`visualservice`'s `/analyze`) rather than a JSON body
+  referencing a shared path.
+- `worker/tasks.py` — `download_file` now also returns `video_path`
+  (relative to the shared root), so an http-driver node can call
+  `audioservice`'s `/process_audio/` with zero service-specific field
+  mapping; confirmed empirically that extra unrecognized JSON fields are
+  silently ignored by its endpoint, so no field-filtering was needed.
+- `worker/tasks.py` — `execute_workflow` now honors a new
+  `settings.parallel: true` workflow flag to call
+  `DAGEngine.execute_parallel()` (previously always `execute()`, sequential
+  regardless of the DAG's actual shape).
+- **Auth decision for the http driver, resolving part of §3's open
+  question**: API keys are treated as static, externally-provisioned
+  context — a literal header value in the workflow JSON — rather than
+  something the driver generates or rotates. A generic driver meant to call
+  arbitrary services shouldn't own service-specific auth lifecycle, and
+  `ensure_api_key()`'s local-shared-file-plus-admin-endpoint model is a
+  single-host assumption that doesn't hold once a service is genuinely
+  reachable only over HTTP (the same reasoning behind §3b's
+  single-host/multi-host split, applied here to auth instead of lifecycle).
+- `workflows/full_pipeline_http_1.0.json` (new) — `download` (python
+  driver) → sibling `{visual, audio}` http-driver nodes, both depending
+  only on `download`. Deliberately **no** `finalize_results` node: that
+  node's success criteria are file-based (`save_to_disk` output on disk),
+  which a driver meant to be genuinely service-agnostic has no business
+  knowing about.
+
+**Verified as genuine concurrency, not just two successes:** in one run,
+the `audio` node completed at a wall-clock time 25 seconds *before* the
+`visual` node finished — only possible if both were dispatched to the
+thread pool at once and ran independently on their separate GPUs, since a
+sequential execution could not have finished `audio` before `visual` even
+completed.
+
+### Still not covered
+
+- Phase 4 (`summarise`/`tagging` job types) — `transcriptservice` and
+  `taggingservice` images are not available on this host.
+- `execute_parallel()` for the production `full_pipeline` template —
+  `process_visual`/`process_audio` still self-manage lifecycle internally
+  and are not retrofitted to the `service`-attribute mechanism, per §3's
+  still-unresolved sequencing blocker (`build_chain()` retirement).
+- A *coded* aggregate-VRAM feasibility check before dispatching a parallel
+  generation — this session's validation is a manual, host-specific GPU
+  pinning (`device_ids` hardcoded in `docker-compose.yml`), which is not
+  portable to a host with a different GPU layout without re-deriving the
+  same reasoning by hand.
+- `DEPLOYMENT_MODE=multi_host` end-to-end — still simulated only (§3b).
+- A service-side regression risk worth tracking: both external-image fixes
+  above were verified against one supplied build each. `capture_contracts.py`
+  (Phase 2 of the runbook) is the fast, no-job-required way to re-check
+  both contracts against any future image update; worth running before
+  trusting a new `narrative-api`/`audioservice` build.

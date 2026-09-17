@@ -128,7 +128,7 @@ def ensure_api_key(api_dir=api_key_path, admin_key=visual_api_admin_key, force=F
     reason = "forced regeneration" if force else "no usable cached key"
     print(f"[Key Manager] {reason}; requesting a new key at {key_file_path}")
 
-    gen_url = visual_api_url + "/generate"
+    gen_url = visual_api_url + "/api/keys/generate"
     headers = {"X-Admin-Key": admin_key, "Content-Type": "application/json"}
     payload = {"client_name": "client_ai4me", "expire_in_days": 365}
 

@@ -102,23 +102,23 @@ def capture_visual(base, video_path, admin_key, outdir):
     note("ok" if status == 200 else "mismatch", f"GET /health/ -> {status} (worker's healthcheck path)")
 
     status, _, raw = request(
-        "POST", f"{base}/generate",
+        "POST", f"{base}/api/keys/generate",
         body={"client_name": "client_ai4me", "expire_in_days": 365},
         headers={"X-Admin-Key": admin_key}, timeout=60,
     )
     save(outdir, "visual_generate.json", raw)
     if status != 200:
-        note("mismatch", f"POST /generate -> {status}; utils.ensure_api_key expects 200. Body: {raw[:200]!r}")
+        note("mismatch", f"POST /api/keys/generate -> {status}; utils.ensure_api_key expects 200. Body: {raw[:200]!r}")
         return
     try:
         key = json.loads(raw).get("api_key")
     except ValueError:
-        note("mismatch", "POST /generate did not return JSON; ensure_api_key calls .json()")
+        note("mismatch", "POST /api/keys/generate did not return JSON; ensure_api_key calls .json()")
         return
     if not key:
-        note("mismatch", f"/generate response has no 'api_key' field: {raw[:200]!r}")
+        note("mismatch", f"/api/keys/generate response has no 'api_key' field: {raw[:200]!r}")
         return
-    note("ok", "POST /generate returned an 'api_key'")
+    note("ok", "POST /api/keys/generate returned an 'api_key'")
 
     with open(video_path, "rb") as f:
         content = f.read()

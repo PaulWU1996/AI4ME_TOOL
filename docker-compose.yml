@@ -84,6 +84,11 @@ services:
       - SHARED_PATH=/app/tmp
       - WORKFLOWS_PATH=/app/workflows
       - ADMIN_KEY=${AI4ME_ADMIN_PASSWORD}
+      # Forwarded (not just baked into ADMIN_KEY above) so the nested `docker compose`
+      # this container shells out to (see worker/utils.py:_compose) can re-interpolate
+      # visualservice's own ADMIN_KEY=${AI4ME_ADMIN_PASSWORD} from its inherited env —
+      # it has no access to the host .env file when starting sibling services.
+      - AI4ME_ADMIN_PASSWORD=${AI4ME_ADMIN_PASSWORD}
       - COMPOSE_PROJECT_DIR=${PWD}
       - COMPOSE_FILE=/app/docker-compose.yml
       - SERVICE_MODES_PATH=/app/tmp/service_modes.json
@@ -108,14 +113,20 @@ services:
       - ./weights:/app/weights
     environment:
       - SHARED_PATH=/app/tmp
-      - MODEL_PATH=/app/weights/PPALUniEncRdFc3Llama31_8B_s2/checkpoint-final
+      - MODEL_PATH=/app/weights/PALUniEncRdFc3Llama31_8B_s2/checkpoint-final
     command: python3 -m uvicorn src.audio_entry:app --host 0.0.0.0 --port 8000
     deploy:
       resources:
         reservations:
           devices:
+            # Pinned to a single GPU (0, an A5000) deliberately: excludes GPU 2
+            # (a 4GB T400 on this host, which OOMs instantly under device_map="auto"
+            # balancing) and GPU 1, since splitting this model's ~18GB of weights
+            # across two devices hits a real bug in its custom code -- a torch.cat
+            # mixing tensors still on cuda:0 and cuda:1 without moving them first.
+            # The weights fit in one A5000's 24GB with room for activations.
             - driver: nvidia
-              count: all
+              device_ids: [ "0" ]
               capabilities: [ gpu ]
     networks:
       - ai_network
@@ -129,14 +140,21 @@ services:
 
   visualservice:
     profiles: [ "on-demand" ]
-    image: narrative-api:latest
+    image: visualservice:latest
     container_name: visualservice
     deploy:
       resources:
         reservations:
           devices:
+            # Pinned to GPU 1, deliberately separate from audioservice's GPU 0:
+            # this model defaults to plain "cuda" (device 0 as the container sees
+            # it), so with count:all it silently landed on the same physical GPU
+            # as audioservice's ~18GB resident model, leaving too little headroom
+            # for its own inference once both are warm at once (keepalive mode,
+            # or any overlap in the DAG path) -- causing a silent per-batch
+            # failure masked as "Error processing frames" text, not a crash.
             - driver: nvidia
-              count: all
+              device_ids: [ "1" ]
               capabilities: [ gpu ]
     environment:
       - ADMIN_KEY=${AI4ME_ADMIN_PASSWORD}
@@ -150,7 +168,8 @@ services:
       - ai_network
     restart: no
     healthcheck:
-      test: [ "CMD", "curl", "-f", "http://localhost:8000/health/" ]
+      # narrative-api's image has no curl/wget; python3 is the only HTTP-capable binary present.
+      test: [ "CMD", "python3", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/health/', timeout=5).status == 200 else 1)" ]
       interval: 1m
       timeout: 30s
       retries: 3
