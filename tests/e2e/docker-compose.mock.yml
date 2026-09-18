@@ -12,7 +12,14 @@
 #
 # Relative volume paths resolve against --project-directory (the repo root),
 # which is also what the worker passes via COMPOSE_PROJECT_DIR, so host and
-# in-container invocations agree on what "./shared" means.
+# in-container invocations agree on what "./tests/e2e/shared" means.
+#
+# Deliberately under tests/e2e/, not the repo-root ./shared and ./data:
+# those are what production's docker-compose.yml mounts for its own real
+# job workspace and cached visual API key. Sharing them would mean an e2e
+# run could read or overwrite production's real state (or vice versa) any
+# time both happened to run at once -- a second collision beyond the
+# container-name one SERVICE_CONTAINER_NAMES (worker/consts.py) fixes.
 
 x-mock-service: &mock-service
   image: ai4me-mock-service:latest
@@ -20,7 +27,7 @@ x-mock-service: &mock-service
   restart: "no"
   networks: [ ai_network ]
   volumes:
-    - ./shared:/app/tmp
+    - ./tests/e2e/shared:/app/tmp
   healthcheck:
     test: [ "CMD", "curl", "-fs", "http://localhost:8000/health" ]
     interval: 2s
@@ -42,8 +49,8 @@ services:
     container_name: mock-controller
     ports: [ "19000:9000" ]
     volumes:
-      - ./shared:/app/tmp
-      - ./data:/app/data
+      - ./tests/e2e/shared:/app/tmp
+      - ./tests/e2e/data:/app/data
       - ./tests/e2e/workflows:/app/workflows
     environment:
       - SHARED_PATH=/app/tmp
@@ -58,8 +65,8 @@ services:
     image: ai4me-mock-worker:latest
     container_name: mock-worker
     volumes:
-      - ./shared:/app/tmp
-      - ./data:/app/data
+      - ./tests/e2e/shared:/app/tmp
+      - ./tests/e2e/data:/app/data
       - ./tests/e2e/workflows:/app/workflows
       - /var/run/docker.sock:/var/run/docker.sock
       - ./tests/e2e/docker-compose.mock.yml:/app/docker-compose.mock.yml:ro
@@ -85,6 +92,14 @@ services:
       - COMPOSE_PROJECT_DIR=${PWD}
       - COMPOSE_PROJECT_NAME=ai4me_mock
       - SERVICE_MODES_PATH=/app/tmp/service_modes.json
+      # visualservice/audioservice/transcriptservice/taggingservice below
+      # carry mock- prefixed container_name so they can't collide with
+      # production's identically-keyed real containers on the same host
+      # Docker daemon. This tells start_service()/stop_service() where to
+      # actually find them -- _compose() below still targets the plain
+      # compose-file keys, which is what "docker compose up -d <key>"
+      # needs regardless of the container's own name.
+      - SERVICE_CONTAINER_NAMES={"visualservice":"mock-visualservice","audioservice":"mock-audioservice","transcriptservice":"mock-transcriptservice","taggingservice":"mock-taggingservice"}
       # Mocks are healthy in ~2s, not ~5min. Without this every cold start
       # would cost a full 60s poll interval.
       - HEALTH_CHECK_TIMEOUT=20
@@ -114,11 +129,11 @@ services:
 
   visualservice:
     <<: *mock-service
-    container_name: visualservice
+    container_name: mock-visualservice
     ports: [ "19001:8000" ]
     volumes:
-      - ./shared:/app/tmp
-      - ./shared/api-data:/app/data
+      - ./tests/e2e/shared:/app/tmp
+      - ./tests/e2e/shared/api-data:/app/data
     environment:
       - MOCK_ROLE=visual
       - MOCK_ADMIN_KEY=mock_admin_password
@@ -134,7 +149,7 @@ services:
 
   audioservice:
     <<: *mock-service
-    container_name: audioservice
+    container_name: mock-audioservice
     ports: [ "19002:8000" ]
     environment:
       - MOCK_ROLE=audio
@@ -150,7 +165,7 @@ services:
 
   transcriptservice:
     <<: *mock-service
-    container_name: transcriptservice
+    container_name: mock-transcriptservice
     ports: [ "19003:8000" ]
     environment:
       - MOCK_ROLE=transcript
@@ -160,7 +175,7 @@ services:
 
   taggingservice:
     <<: *mock-service
-    container_name: taggingservice
+    container_name: mock-taggingservice
     ports: [ "19004:8000" ]
     environment:
       - MOCK_ROLE=tagging

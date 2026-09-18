@@ -34,11 +34,25 @@ AUDIO_SINK = "http://localhost:19002"
 CALLBACK_URL = "http://callbacksink:8000/callback"
 WORKFLOWS_DIR = os.path.join(REPO, "tests", "e2e", "workflows")
 REGISTRY = os.path.join(WORKFLOWS_DIR, "registry.json")
-DATA_DIR = os.path.join(REPO, "data")
-SHARED_DIR = os.path.join(REPO, "shared")
+# tests/e2e/-scoped, not the repo-root data/ and shared/ -- those are
+# production's real job workspace and cached visual API key
+# (docker-compose.mock.yml has the full reasoning). Matching that here is
+# what actually makes it not collide: this is where the mock stack's
+# volumes point, and what the scenarios below read/write directly.
+DATA_DIR = os.path.join(REPO, "tests", "e2e", "data")
+SHARED_DIR = os.path.join(REPO, "tests", "e2e", "shared")
 
 CORE_SERVICES = ["redis", "controller", "worker", "callbacksink"]
 MOCK_SERVICES = ["visualservice", "audioservice", "transcriptservice", "taggingservice"]
+# compose()'s -s/service-name arguments above are compose-file keys, safely
+# project-scoped by PROJECT regardless of what a container is actually
+# named. These are the container_name values docker-compose.mock.yml
+# actually gives them -- required wherever this script talks to the Docker
+# daemon directly (docker inspect / docker rm) rather than through
+# `compose(...)`, since that bypasses project scoping and a stale literal
+# name here reaches whatever container that name belongs to on the host,
+# mock or not.
+MOCK_CONTAINER_NAMES = {name: f"mock-{name}" for name in MOCK_SERVICES}
 
 GREEN, RED, YELLOW, DIM, RESET = "\033[32m", "\033[31m", "\033[33m", "\033[2m", "\033[0m"
 
@@ -601,14 +615,15 @@ def scenario_coldstart(ctx):
     for name in ("visualservice", "audioservice"):
         compose("stop", name, check=False)
         compose("rm", "-f", name, check=False)
-    assert container_state("visualservice") == "absent", "expected no visual container before the job"
+    assert container_state(MOCK_CONTAINER_NAMES["visualservice"]) == "absent", \
+        "expected no visual container before the job"
 
     job_id = submit(ctx["video"], job_type="full")
     result = poll_job(job_id)
     assert result["status"] == "SUCCESS", result
 
     for name in ("visualservice", "audioservice"):
-        state = container_state(name)
+        state = container_state(MOCK_CONTAINER_NAMES[name])
         assert state in ("exited", "absent"), f"{name} left in state {state!r} after the job"
     return "containers cold-started on demand and were stopped afterwards"
 
@@ -629,8 +644,8 @@ def scenario_keepalive(ctx):
         job_id = submit(ctx["video"], job_type="full")
         result = poll_job(job_id)
         assert result["status"] == "SUCCESS", result
-        assert container_state("visualservice") == "running", "keepalive container was stopped"
-        assert container_state("audioservice") == "running", "keepalive container was stopped"
+        assert container_state(MOCK_CONTAINER_NAMES["visualservice"]) == "running", "keepalive container was stopped"
+        assert container_state(MOCK_CONTAINER_NAMES["audioservice"]) == "running", "keepalive container was stopped"
         return "both services stayed resident across the job"
     finally:
         os.remove(modes_path) if os.path.exists(modes_path) else None
@@ -732,6 +747,26 @@ def build_images():
     run(["docker", "build", "-q", "-f", "worker/Dockerfile", "-t", "ai4me-mock-worker:latest", "."])
 
 
+def reclaim_ownership():
+    """The mock containers run as root, same as production's images, so any
+    file they create through the bind mounts (job workspaces, api.key,
+    mock_control.json, ...) comes out root-owned. This script also writes
+    directly into DATA_DIR/SHARED_DIR from the host side (write_fixtures,
+    set_mock_control, the stale-key scenario, ...) as whatever user is
+    running it -- which a root-owned file left by an earlier run then
+    blocks with PermissionError. Self-heal by chowning both trees back with
+    a one-off container, rather than requiring host-side sudo. Uses the
+    already-built mock image so a first run needs no extra pull.
+    """
+    os.makedirs(DATA_DIR, exist_ok=True)
+    os.makedirs(SHARED_DIR, exist_ok=True)
+    uid_gid = f"{os.getuid()}:{os.getgid()}"
+    for d in (DATA_DIR, SHARED_DIR):
+        run(["docker", "run", "--rm", "-v", f"{d}:/target",
+             "ai4me-mock-service:latest", "chown", "-R", uid_gid, "/target"],
+            check=False, capture=True)
+
+
 def bring_up():
     compose("up", "-d", *CORE_SERVICES)
     wait_for_controller()
@@ -740,7 +775,7 @@ def bring_up():
 def tear_down():
     compose("down", "-v", "--remove-orphans", check=False)
     for name in MOCK_SERVICES:
-        run(["docker", "rm", "-f", name], check=False, capture=True)
+        run(["docker", "rm", "-f", MOCK_CONTAINER_NAMES[name]], check=False, capture=True)
 
 
 def main():
@@ -750,12 +785,16 @@ def main():
     parser.add_argument("--no-build", action="store_true", help="skip docker build")
     args = parser.parse_args()
 
-    os.makedirs(SHARED_DIR, exist_ok=True)
-    video, transcript = write_fixtures()
-    ctx = {"video": "/app/data/mock_video.mp4", "transcript": "/app/data/mock_transcript.json"}
-
     if not args.no_build:
         build_images()
+
+    # Needs ai4me-mock-service:latest (just above) to chown with, and must
+    # run before anything else touches DATA_DIR/SHARED_DIR -- an earlier
+    # run's root-owned leftovers (its containers run as root, same as
+    # production's images) block this run's own writes otherwise.
+    reclaim_ownership()
+    video, transcript = write_fixtures()
+    ctx = {"video": "/app/data/mock_video.mp4", "transcript": "/app/data/mock_transcript.json"}
 
     tear_down()
     reset_registry()

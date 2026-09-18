@@ -8,7 +8,7 @@ Contracts reproduced here are the ones worker/tasks.py and worker/utils.py
 actually depend on, nothing more:
 
   visual      GET  /health/          -> 200
-              POST /generate         -> {"api_key": ...}   (X-Admin-Key)
+              POST /api/keys/generate -> {"api_key": ...}   (X-Admin-Key)
               POST /analyze          -> XML VideoAnalysis  (X-API-Key, multipart)
   audio       GET  /health/          -> 200
               POST /process_audio/   -> {"output": [{start, end, caption}]}
@@ -25,7 +25,13 @@ show you:
   MOCK_STARTUP_DELAY   seconds before /health starts returning 200
                        (simulates model load; the worker's health poll waits)
   MOCK_LATENCY         seconds each work endpoint sleeps before answering
-  MOCK_FAIL_MODE       "" | error500 | timeout | badbody | unhealthy
+  MOCK_FAIL_MODE       "" | error500 | timeout | badbody | unhealthy | emptyresult
+                       emptyresult: 200, well-formed body, but semantically
+                       empty/error -- the shape real services returned for
+                       the two bugs found in SCOPE_PLAN.md §11 (narrative-api's
+                       uncaught KeyError became a 200 <Error> body instead of
+                       <VideoAnalysis>; a silently-empty result is the general
+                       case). Catches "worker trusts a 200 it shouldn't."
   MOCK_SEGMENTS        how many segments/captions to fabricate (default 3)
 """
 import json
@@ -236,7 +242,7 @@ class Handler(BaseHTTPRequestHandler):
         if not key:
             return "X-API-Key header is required"
         if STRICT and key not in _load_issued_keys():
-            return f"X-API-Key {key!r} was never issued by /generate"
+            return f"X-API-Key {key!r} was never issued by /api/keys/generate"
         return None
 
     def _check_analyze(self, body):
@@ -281,8 +287,13 @@ class Handler(BaseHTTPRequestHandler):
 
     # -- failure injection -------------------------------------------------
 
-    def _maybe_fail(self):
-        """Return True if the request was answered by a failure injection."""
+    def _maybe_fail(self, empty=None):
+        """Return True if the request was answered by a failure injection.
+
+        `empty` is the (status, payload, content_type) to send for
+        fail_mode=emptyresult -- the caller knows the well-formed-but-empty
+        shape for its own route, this method doesn't.
+        """
         mode = fail_mode()
         if mode == "error500":
             self._send(500, {"detail": "mock injected failure"})
@@ -293,6 +304,10 @@ class Handler(BaseHTTPRequestHandler):
             return True
         if mode == "badbody":
             self._send(200, "this is not the json you are looking for", "text/plain")
+            return True
+        if mode == "emptyresult" and empty is not None:
+            log("fail_mode=emptyresult — 200 with a well-formed but empty/error body")
+            self._send(*empty)
             return True
         return False
 
@@ -319,7 +334,7 @@ class Handler(BaseHTTPRequestHandler):
             time.sleep(delay)
 
         # Visual service ---------------------------------------------------
-        if path == "/generate":
+        if path == "/api/keys/generate":
             admin = self.headers.get("X-Admin-Key")
             if not admin:
                 return self._send(401, {"detail": "X-Admin-Key required"})
@@ -344,7 +359,15 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(401, {"detail": auth_problem})
             if self._reject(self._check_analyze(body)):
                 return
-            if self._maybe_fail():
+            # The real bug this reproduces (SCOPE_PLAN.md §11): narrative-api
+            # caught its own KeyError and returned this shape -- 200, XML,
+            # just no <VideoAnalysis> root -- so extract_flat_captions found
+            # nothing and returned [] with no error anywhere.
+            if self._maybe_fail(empty=(
+                200,
+                '<?xml version="1.0" encoding="UTF-8"?><Error>Internal processing error</Error>',
+                "application/xml",
+            )):
                 return
             log(f"/analyze received {len(body)} bytes of multipart video")
             return self._send(200, visual_xml(), "application/xml")
@@ -357,7 +380,10 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(422, {"detail": "body was not JSON"})
             if self._reject(self._check_process_audio(parsed)):
                 return
-            if self._maybe_fail():
+            # Well-formed shape (has "output", process_audio's `for entry in
+            # ...output` loop doesn't error), just empty -- the job succeeds
+            # with zero audio segments and nothing flags it.
+            if self._maybe_fail(empty=(200, {"status": "success", "output": []})):
                 return
             log(f"/process_audio video_path={parsed.get('video_path')} "
                 f"chunks={len(parsed.get('chunks') or [])}")

@@ -121,6 +121,14 @@ booking.
 The tool is self-tested: it reports 11/11 OK against the mock services, so a
 mismatch tomorrow is a real difference, not a bug in the tool.
 
+It also writes `contracts/<timestamp>/manifest.json`, recording the local
+image ID of `audioservice:latest`/`visualservice:latest` at capture time.
+Run `python3 scripts/check_contract_freshness.py` (read-only, no GPU needed)
+any time before trusting a job's output — it flags either image if it no
+longer matches the last committed capture, which is the signal to come back
+and re-run this phase before the drift causes a silent regression like the
+ones this session found.
+
 ---
 
 ## Phase 3 — The same video through the DAG (~20 min)

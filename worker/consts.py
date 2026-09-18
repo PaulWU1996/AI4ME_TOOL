@@ -1,4 +1,5 @@
-import os 
+import json
+import os
 
 redis_host = os.getenv("REDIS_HOST", "127.0.0.1")
 redis_port = os.getenv("REDIS_PORT", "6379")
@@ -37,6 +38,18 @@ api_key_path = os.getenv("API_KEY_PATH", "/app/data")
 compose_file = os.getenv("COMPOSE_FILE", "/app/docker-compose.yml")
 project_dir = os.getenv("COMPOSE_PROJECT_DIR")
 service_modes_path = os.getenv("SERVICE_MODES_PATH", "/app/tmp/service_modes.json")
+
+# start_service()/stop_service() pass a service's compose-file key (e.g.
+# "visualservice") straight to `docker container get()` too, assuming
+# container_name == the compose key -- true in production, where it's set
+# explicitly to match. A second stack sharing that same key (tests/e2e's
+# mock compose file) can't also set container_name to the same literal
+# string without colliding with production's real container on the host
+# Docker daemon. This lets such a stack tell the worker "look up container
+# X for logical service Y" instead, without changing the compose key
+# `_compose()` needs. Empty/unset (the production default) preserves
+# today's exact behavior: container_name is assumed to equal service_name.
+SERVICE_CONTAINER_NAMES = json.loads(os.getenv("SERVICE_CONTAINER_NAMES", "{}"))
 
 transcript_text_file = "transcript.txt"
 

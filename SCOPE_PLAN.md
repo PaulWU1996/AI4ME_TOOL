@@ -853,3 +853,208 @@ completed.
   (Phase 2 of the runbook) is the fast, no-job-required way to re-check
   both contracts against any future image update; worth running before
   trusting a new `narrative-api`/`audioservice` build.
+
+## 12. Contract freshness tooling, and the 30s audio-boundary bug diagnosed — done (2026-09-18)
+
+Follow-up session against the same real GPU host (2×A5000 + 1×T400),
+picking up two items from `docs/TEST_DEPLOYMENT_PLAN.md`'s near-term list.
+
+### Contract freshness now checkable without re-reading `worker/tasks.py`
+
+The previous session's risk ("re-run `capture_contracts.py` whenever
+`narrative-api`/`audioservice` gets a new build, or a silent regression like
+the two found in §11 could ship unnoticed") depended entirely on someone
+remembering to do it. Closed by making staleness a checkable fact instead of
+a reminder:
+
+- `scripts/capture_contracts.py` now also records `audioservice:latest`'s and
+  `visualservice:latest`'s local Docker image ID into
+  `contracts/<timestamp>/manifest.json` at capture time.
+- `scripts/check_contract_freshness.py` (new, read-only) diffs the
+  currently-loaded image IDs against the last committed manifest and reports
+  `FRESH`/`STALE`/`MISSING` per image, exit code 1 on any drift.
+- Verified for real, not just unit-tested: ran a live capture against this
+  host's `audioservice`/`visualservice` (9/9 checks passed, no mismatches —
+  §11's fixes are holding), confirmed the freshness checker reports `FRESH`
+  against that real manifest, and confirmed it correctly reports `STALE`
+  with the right old→new ID diff when the recorded ID doesn't match (tested
+  via a throwaway manifest, not by touching the real images).
+- Evidence: `contracts/20260918-175825/`.
+
+### 30-second audio-segmentation boundary bug — root cause confirmed, fix deliberately deferred
+
+`docs/TEST_DEPLOYMENT_PLAN.md` flagged this from an earlier observation
+without a root cause. Reproduced directly against the real `audioservice`
+this session:
+
+- `audio_logic.py`'s `_split_video_to_audio` runs
+  `ffmpeg -f segment -segment_time 30` over the whole input with no
+  minimum-chunk-size guard. Manually replicating that command against a
+  video whose duration is exactly `30.000s` produces a second file that is
+  **112 bytes, 1.06ms (34 samples at 16kHz)**.
+- That sliver reaches the audio encoder's first conv layer (kernel size 3)
+  with too few samples: `POST /process_audio/` → 500,
+  `"Calculated padded input size per channel: (0). Kernel size: (3). Kernel
+  size can't be greater than actual input size"`.
+- The failure window is narrow, not the full "~1s" originally guessed: a
+  30.02s clip (22ms trailing chunk) and a 60.03s clip (22ms trailing chunk)
+  both processed successfully end to end. Only landing within roughly a few
+  samples of an exact multiple crashes. The exact minimum safe margin was
+  not pinned down further.
+- Confirmed the `chunks`/`prompts` fields `process_audio` sends
+  (`worker/tasks.py`) are dead on arrival: the real `/process_audio/`
+  signature only declares `video_path` — FastAPI silently drops the rest.
+  Audioservice always re-derives its own fixed 30s windows from the file
+  itself; nothing the worker sends can influence that.
+- **Decision: request the upstream fix (merge a trailing segment under some
+  threshold into the previous one, inside `_split_video_to_audio`), do not
+  add worker-side defensive handling.** Two reasons: (1) the worker image
+  has zero video-duration capability today — no `ffmpeg`/`ffprobe`, nothing
+  in `worker/requirements.txt` — so a worker-side probe-and-trim would mean
+  adding a new system dependency to the worker image for a failure window
+  this narrow; (2) unlike §11's two external-image bugs, this one fails
+  loudly (a clean 500 that fails the job) rather than silently corrupting
+  output, so the cost of leaving it unfixed for now is a job retry, not a
+  silent bad result.
+- Not yet done: actually filing/requesting the upstream fix with whoever
+  supplies `audioservice`. This session only diagnosed and decided; the ask
+  itself is still open.
+
+### `mocks/service.py` corrected against reality, and a mis-diagnosis caught along the way
+
+Running `tests/e2e/run_e2e.py` on this host (which already had a real,
+resident `visualservice`/`audioservice` from earlier in this session) gave
+14/21 failures, all `"Failed to obtain/regenerate API key for visual
+service"`. First hypothesis was a container-name collision: `tests/e2e/
+docker-compose.mock.yml` hardcodes `container_name: visualservice` /
+`audioservice`, identical to the production `docker-compose.yml`, and
+Compose does not refuse to steal a name already in use by a *different*
+project — it stops and replaces it. That's real and was confirmed by
+direct reproduction (a probe `docker compose up -d visualservice` against
+the mock file *did* tear down and replace the live production container;
+caught immediately, real `visualservice:latest` restored and re-verified
+against `capture_contracts.py`, no lasting effect) — but reproducing it
+does not by itself prove it caused the original 14 failures, and on closer
+look it didn't:
+
+- `worker/utils.py`'s `ensure_api_key()` calls `POST /api/keys/generate`
+  (fixed from the wrong `/generate` path in §11, commit `10dd009`).
+  `mocks/service.py` was never updated in that same commit and still only
+  answered `POST /generate` — every visual-key request from the e2e
+  suite's own `mock-worker` (built from the same, now-fixed worker code)
+  404'd, `ensure_api_key()`'s blanket `except Exception: return None`
+  swallowed it, and `process_visual` raised exactly the observed message.
+  Confirmed by isolated reproduction: running `mocks/service.py` directly
+  (no Docker, no Compose, so no possible name collision) reproduced the
+  404 on the old path and success on the new one.
+- Fixed: `mocks/service.py`'s route, docstring, and the stale
+  `"...was never issued by /generate"` error string all now say
+  `/api/keys/generate`.
+- Added `MOCK_FAIL_MODE=emptyresult` (the item flagged in this file's
+  "Near-term" list): a 200 with a well-formed-but-empty/error body,
+  reproducing the exact shape of both real silent bugs from §11 — visual
+  gets narrative-api's actual `<Error>...</Error>` root instead of
+  `<VideoAnalysis>` (confirmed against `worker/utils.py:extract_flat_captions`
+  that this silently returns `[]`, no exception, exactly like the real
+  bug); audio gets a well-formed `{"output": []}`. Verified against the
+  running mock directly, not just by reading the diff.
+- The container-name collision is still real and still unresolved — it's
+  a separate, standing risk for running the e2e suite on any host that
+  already has the production stack up, independent of this fix. Not
+  addressed this session.
+
+### Full e2e run against the fixed mock: 20/21
+
+Confirmed the mock fix by running `tests/e2e/run_e2e.py` for real, not just
+in isolation. Required stopping the live production stack first
+(`docker compose stop worker controller redis`, `docker rm -f visualservice
+audioservice`) to sidestep the container-name collision above, since it was
+not fixed this session. Production was restored afterward
+(`docker compose start` for the first three, `docker compose --profile
+on-demand up -d` to recreate the other two from the real images) and
+re-verified via `capture_contracts.py` — both services healthy and
+functionally identical to before (same image IDs, same `/analyze`/
+`/process_audio/` responses).
+
+- **20/21 scenarios passed** — every scenario that failed before the mock
+  fix (all 14 of the `/generate`-path failures) now passes.
+- **The one remaining failure, `stale-api-key-recovered`, is not a contract
+  bug**: `PermissionError: [Errno 13] Permission denied:
+  '.../data/api.key'`. The scenario's own setup writes directly to
+  `data/api.key` on the host to poison the cache, but an earlier scenario's
+  mock-worker container (running as root, same as the real worker image)
+  had already created that file through the bind mount, leaving it
+  root-owned — the host-side Python test process (running as the ordinary
+  host user) can't overwrite a root-owned file. Not fixed this session.
+- **New risk found while diagnosing that failure, not previously flagged**:
+  the e2e mock stack does not isolate itself from production at the
+  filesystem level. `docker-compose.mock.yml` mounts the *same* host paths
+  production's `docker-compose.yml` does — `./data` (worker's
+  `API_KEY_PATH`) and `./shared` (including `./shared/api-data`, the real
+  visual service's own key store) — not separate `tests/e2e/`-scoped
+  directories. This is on top of the container-name collision, not a
+  restatement of it: even if the container names were fixed, a mock run
+  could still read or overwrite production's real cached API key or shared
+  job workspace, or vice versa, if the two stacks ever ran at the same
+  time. Not addressed this session; worth its own fix (give the mock stack
+  its own directories) before treating e2e as safe to run without stopping
+  production.
+
+### Both collision risks above, actually fixed and verified against live production
+
+Same session, immediately after. Confirmed the fix by running the full e2e
+suite a second time with production genuinely up throughout — not stopped
+first, unlike the 20/21 run above.
+
+- **Container-name collision**: `start_service()`/`stop_service()`
+  (`worker/utils.py`) assumed `container_name == service_name` for the
+  Docker SDK lookup, which is why the mock file had to reuse production's
+  literal names. Decoupled: a new `SERVICE_CONTAINER_NAMES` JSON env var
+  (`worker/consts.py`, same pattern as the existing `SERVICE_CONCURRENCY`)
+  maps a logical service name to its actual container name, defaulting to
+  identity when unset -- zero behavior change for production, which sets
+  nothing. `docker-compose.mock.yml`'s four analysis services now carry
+  `container_name: mock-visualservice` etc., with `SERVICE_CONTAINER_NAMES`
+  telling the mock worker where to find them. `_compose()` itself is
+  untouched -- it already targets the compose-file key, not the container
+  name, so it needed no change.
+- **Filesystem collision**: `docker-compose.mock.yml` and
+  `tests/e2e/run_e2e.py`'s `DATA_DIR`/`SHARED_DIR` now point at
+  `tests/e2e/data`/`tests/e2e/shared` instead of the repo-root ones
+  production uses.
+- **A bug found and fixed while doing this, not present before**:
+  `tear_down()` had a manual `docker rm -f <name>` loop (a belt-and-suspenders
+  cleanup beyond `docker compose down`) using the literal old names. Since
+  the rename made the mock's own containers no longer match those names,
+  those lines became a live footgun aimed at whatever container *did* still
+  carry them -- production's real ones, given they were up during testing.
+  This is exactly what happened: the first post-rename e2e run silently
+  removed the real `visualservice`/`audioservice` containers (output was
+  captured but suppressed by the script's own `check=False` — nothing
+  printed to say so). Caught immediately, restored the same way as the
+  earlier incident, re-verified via `capture_contracts.py`. Fixed by
+  routing that cleanup through a `MOCK_CONTAINER_NAMES` map (and the same
+  for `container_state()`'s handful of direct `docker inspect` calls,
+  which had the identical latent issue — read-only, so not destructive,
+  but would have returned production's container state instead of the
+  mock's, silently corrupting scenario assertions).
+- **Second-order bug also found and fixed**: isolating the paths didn't
+  eliminate the pre-existing `stale-api-key-recovered` permission failure
+  (noted above) — it made a *broader* version of it appear, since the
+  fresh `tests/e2e/` directories had no pre-existing host-owned files to
+  coincidentally paper over the issue the way the long-lived repo-root
+  ones did. Root cause: `docker run` auto-creates a bind-mount source
+  that doesn't yet exist, owned by root (the daemon's own user), and the
+  mock containers themselves (root, same as production's images) create
+  everything else through the mount the same way — none of it writable
+  by the host-side Python script afterward. Added `reclaim_ownership()`:
+  a one-off `docker run --rm -v ... ai4me-mock-service:latest chown -R
+  <uid>:<gid>` against both trees at the top of every run, using the
+  already-built mock image rather than pulling a new one. Confirmed
+  working: the second full run reproduced the exact same 20/21 result as
+  the pre-isolation run, this time without touching production at all.
+  The original single-scenario permission failure
+  (`stale-api-key-recovered` writes `api.key` directly from the host
+  mid-run, after an earlier scenario's container has already legitimately
+  re-created it as root) is narrower than what isolation exposed, but is
+  its own separate, still-open bug -- not fixed this session.

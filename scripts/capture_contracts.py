@@ -23,6 +23,7 @@ import argparse
 import datetime
 import json
 import os
+import subprocess
 import sys
 import urllib.error
 import urllib.request
@@ -36,6 +37,29 @@ DEFAULTS = {
     "transcript": "http://localhost:9003",
     "tagging": "http://localhost:9004",
 }
+
+# Only the two services loaded from a fixed local tag (`docker load -i
+# *.tar`) get freshness tracking. transcript/tagging resolve to an
+# ECR ref via AWS_ACCOUNT_ID/AWS_REGION env vars, so "new build" there
+# is already visible as a tag/digest change in the registry.
+IMAGE_NAMES = {
+    "visual": "visualservice:latest",
+    "audio": "audioservice:latest",
+}
+
+
+def image_id(image_name):
+    """Local image ID (sha256:...) for freshness comparisons, or None."""
+    try:
+        out = subprocess.run(
+            ["docker", "image", "inspect", "--format={{.Id}}", image_name],
+            capture_output=True, text=True, timeout=30,
+        )
+    except (OSError, subprocess.SubprocessError) as e:
+        return None, str(e)
+    if out.returncode != 0:
+        return None, out.stderr.strip() or f"exit {out.returncode}"
+    return out.stdout.strip(), None
 
 GREEN, RED, YELLOW, DIM, RESET = "\033[32m", "\033[31m", "\033[33m", "\033[2m", "\033[0m"
 
@@ -267,6 +291,22 @@ def main():
         capture_script_service("transcript", args.transcript_url, args.job_id, outdir)
     if "tagging" in wanted:
         capture_script_service("tagging", args.tagging_url, args.job_id, outdir)
+
+    manifest = {}
+    for name in wanted:
+        image_name = IMAGE_NAMES.get(name)
+        if not image_name:
+            continue
+        id_, err = image_id(image_name)
+        manifest[name] = {"image": image_name, "id": id_}
+        if id_:
+            note("ok", f"recorded {image_name} id for freshness tracking: {id_[:19]}...")
+        else:
+            note("warn", f"could not read {image_name}'s id ({err}); "
+                          "check_contract_freshness.py won't be able to track it")
+
+    with open(os.path.join(outdir, "manifest.json"), "w") as f:
+        json.dump(manifest, f, indent=2)
 
     with open(os.path.join(outdir, "findings.json"), "w") as f:
         json.dump(findings, f, indent=2)

@@ -11,6 +11,7 @@ from consts import (
     compose_file,
     project_dir,
     service_modes_path,
+    SERVICE_CONTAINER_NAMES,
     HEALTH_CHECK_TIMEOUT,
     HEALTH_CHECK_INTERVAL,
     api_key_path,
@@ -21,6 +22,10 @@ from consts import (
 
 
 docker_client = docker.from_env()
+
+
+def _container_name(service_name):
+    return SERVICE_CONTAINER_NAMES.get(service_name, service_name)
 
 
 # --- Service Container Management ---
@@ -51,7 +56,7 @@ def _compose(service_name, *args):
 def start_service(service_name, max_retries=1):
     if service_modes.get(service_name) == "keepalive":
         try:
-            container = docker_client.containers.get(service_name)
+            container = docker_client.containers.get(_container_name(service_name))
             container.reload()
             health = container.attrs.get("State", {}).get("Health", {}).get("Status")
             if health == "healthy":
@@ -69,7 +74,7 @@ def start_service(service_name, max_retries=1):
         # health check
         elapsed = 0
         while elapsed < HEALTH_CHECK_TIMEOUT:
-            container = docker_client.containers.get(service_name)
+            container = docker_client.containers.get(_container_name(service_name))
             container.reload()
             health = container.attrs.get("State", {}).get("Health", {}).get("Status")
             if health == "healthy":
