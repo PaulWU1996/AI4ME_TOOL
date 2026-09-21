@@ -1,7 +1,0 @@
-# Workflows registered during an e2e run land here. Only the seeded
-# templates are tracked; anything the run itself creates is not.
-typo_demo_*.json
-cyclic_demo_*.json
-*.json.tmp
-dup_demo_*.json
-customflow_*.json
