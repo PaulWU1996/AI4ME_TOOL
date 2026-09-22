@@ -29,7 +29,7 @@ services:
     build:
       context: .
       dockerfile: controller/Dockerfile
-    image: ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPO}:controller
+    # image: ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPO}:controller
     container_name: controller
     ports:
       - "9000:9000"
@@ -55,7 +55,7 @@ services:
     build:
       context: .
       dockerfile: worker/Dockerfile
-    image: ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPO}:worker
+    # image: ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPO}:worker
     container_name: worker
     volumes:
       - ./shared:/app/tmp
@@ -68,8 +68,8 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock
       - ./docker-compose.yml:/app/docker-compose.yml:ro
     environment:
-      - AWS_ACCOUNT_ID=${AWS_ACCOUNT_ID}
-      - AWS_REGION=${AWS_REGION}
+      # - AWS_ACCOUNT_ID=${AWS_ACCOUNT_ID}
+      # - AWS_REGION=${AWS_REGION}
       - ECR_REPO=${ECR_REPO}
       - REDIS_HOST=redis
       - REDIS_PORT=6379
@@ -177,7 +177,7 @@ services:
 
   transcriptservice:
     profiles: [ "on-demand", "llm" ]
-    image: ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/ai4me/summarise:summarise
+    # image: ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/ai4me/summarise:summarise
     container_name: transcriptservice
     ports:
       - "9003:8000"
@@ -209,7 +209,7 @@ services:
 
   taggingservice:
     profiles: [ "on-demand", "llm" ]
-    image: ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/ai4me/tagger:tagger
+    # image: ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/ai4me/tagger:tagger
     container_name: taggingservice
     ports:
       - "9004:8000"
