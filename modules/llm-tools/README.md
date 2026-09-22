@@ -1,16 +1,16 @@
-# AI4ME Transcript Processor
+# AI4ME LLM Tools
 
-A containerized FastAPI service that converts transcripts into shortform content. An external orchestrator sends a `job_id`, this service reads the transcript from a shared volume, runs it through a local Ollama LLM, and returns a catchy title + summary — also writing the result back to the shared volume.
+A containerized FastAPI service that processes transcripts with a local Ollama LLM. An external orchestrator sends a `job_id` and a `mode`; each mode is a distinct function with its own prompt and response schema. The service reads the transcript from a shared volume, runs it through the LLM, and returns the mode's structured result — also writing it to `output.json` on the shared volume.
 
 ## How it works
 
 ```
 Orchestrator
     │  1. Writes  shared/{job_id}/transcript.txt
-    │  2. POST /process  {"job_id": "...", "job_type": "script"}
+    │  2. POST /process  {"job_id": "...", "job_type": "script", "mode": "summary"}
     │  3. Reads   shared/{job_id}/output.json
     ▼
-transcript-processor container
+llm-tools container
     ├── FastAPI :8000
     └── Ollama  :11434 (localhost only, models bind-mounted from host)
 ```
@@ -45,6 +45,11 @@ curl -X POST http://localhost:8000/process \
     "prompts": "You are a news editor. Write a punchy headline and a one-sentence summary."
   }'
 
+# Run another mode (tags instead of title + summary):
+curl -X POST http://localhost:8000/process \
+  -H 'Content-Type: application/json' \
+  -d '{"job_id": "test123", "job_type": "script", "mode": "tagging"}'
+
 # With a callback URL (result is POSTed there after processing):
 curl -X POST http://localhost:8000/process \
   -H 'Content-Type: application/json' \
@@ -59,11 +64,12 @@ curl -X POST http://localhost:8000/process \
 |---|---|---|---|
 | `job_id` | string | yes | Orchestrator-assigned job identity |
 | `job_type` | string | yes | Must be `"script"` |
+| `mode` | string | no | Which function to run — `"summary"` (default) or `"tagging"`. See [Modes](#modes) |
 | `language` | string | no | Response language, e.g. `"en"`, `"zh"` (default `"en"`) |
 | `callback_url` | string | no | If set, result is POSTed here after `output.json` is written |
-| `prompts` | string | no | Overrides the requirements section of the prompt (see Prompt structure below); must contain a `{language}` slot |
+| `prompts` | string | no | Overrides the requirements section of the mode's prompt (see [Prompt structure](#prompt-structure)); must contain a `{language}` slot |
 
-**Response (HTTP 200):**
+**Response (HTTP 200):** the shape depends on `mode`. For `summary`:
 ```json
 {
   "job_id": "test123",
@@ -71,6 +77,16 @@ curl -X POST http://localhost:8000/process \
   "summary": "Researchers found that habits formed before 9 AM have an outsized impact on daily productivity, driven by peak prefrontal cortex plasticity immediately after waking.",
   "model": "llama3.2:3b",
   "processing_time_ms": 4217
+}
+```
+
+For `tagging`:
+```json
+{
+  "job_id": "test123",
+  "tags": ["science", "habits", "productivity"],
+  "model": "llama3.2:3b",
+  "processing_time_ms": 3100
 }
 ```
 
@@ -92,6 +108,34 @@ The same payload is written to `shared/{job_id}/output.json`.
 ```
 
 Returns HTTP 503 if Ollama is not ready. Poll this before sending the first job.
+
+## Modes
+
+A mode is one function this service can perform on a transcript. Each mode has a name, a response schema, and its own prompt files. The mode is selected with the `mode` field on every request.
+
+| Mode | Response fields | Purpose |
+|---|---|---|
+| `summary` (default) | `title`, `summary` | Catchy headline + bullet-point summary |
+| `tagging` | `tags` | Descriptive topic/keyword tags in order of discussion |
+
+**Adding a new mode** (e.g. `sentiment`) requires two prompt files:
+
+```
+app/prompts/sentiment/transcript.txt         # requirements — must contain a {language} slot
+app/prompts/sentiment/output_structure.txt   # the exact JSON shape the model must return
+```
+
+Then register the mode in the `MODES` registry in `app/routers/process.py`:
+
+```python
+MODES: dict[str, tuple[Path, type[SummaryResponse] | type[TaggingResponse] | ...]] = {
+    "summary": (Path("prompts", "summary"), SummaryResponse),
+    "tagging": (Path("prompts", "tagging"), TaggingResponse),
+    "sentiment": (Path("prompts", "sentiment"), SentimentResponse),   # new
+}
+```
+
+The response model declares the mode's output fields, and a matching branch in `_validate_result` checks the LLM's JSON before it is returned or written to `output.json`. No other code changes are needed — the mode is discovered at request time, so any new `mode` value starts working immediately after a rebuild.
 
 ## Composing with the orchestrator
 
@@ -144,19 +188,19 @@ Then update `image:` in the snippet above to match the registry path.
 
 ## Prompt structure
 
-The prompt sent to Ollama is assembled from two separate files:
+Each mode's prompt is assembled from two files inside `app/prompts/{mode}/`:
 
 | File | Editable | Purpose |
 |---|---|---|
-| `app/prompts/transcript.txt` | Yes — overridable via `prompts` field | Requirements: what the model should produce and in what style |
-| `app/prompts/output_structure.txt` | No — always fixed | Output schema: the exact JSON format the model must return |
+| `app/prompts/{mode}/transcript.txt` | Yes — overridable via the `prompts` field | Requirements: what the model should produce and in what style |
+| `app/prompts/{mode}/output_structure.txt` | No — always fixed | Output schema: the exact JSON format the model must return |
 
 The final prompt assembled at runtime looks like:
 
 ```
 <system>
-{requirements}          ← from transcript.txt, or the prompts field if provided
-{output_structure}      ← always from output_structure.txt, never overridden
+{requirements}          ← from {mode}/transcript.txt, or the prompts field if provided
+{output_structure}      ← always from {mode}/output_structure.txt, never overridden
 </system>
 
 <user>
