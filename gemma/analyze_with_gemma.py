@@ -33,6 +33,7 @@ AUDIO_CAPABLE_MODELS = {
     "google/gemma-4-E2B-it",
     "google/gemma-4-E4B-it",
 }
+AVAILABLE_PROCESSES = ("visual", "audio", "transcript")
 
 
 @dataclass
@@ -477,7 +478,12 @@ def event_metadata(event: Event, root: Path) -> Dict[str, Any]:
     }
 
 
-def build_analysis_prompt(clip_has_audio: bool,overarching_description: Optional[str], preceding_narrative: Optional[str] ) -> str:
+def build_analysis_prompt(
+    clip_has_audio: bool,
+    overarching_description: Optional[str],
+    preceding_narrative: Optional[str],
+    processes: set[str],
+) -> str:
     overarching_description_hint = ""
     if overarching_description:
         overarching_description_hint = (
@@ -488,7 +494,27 @@ def build_analysis_prompt(clip_has_audio: bool,overarching_description: Optional
         preceding_narrative_hint = (
         f"The description produced by you when describing the preceding events from the episode is: {preceding_narrative}\n"
         )
-    audio_hint = "Audio input is present." if clip_has_audio else "No audio input is available."
+    audio_requested = bool(processes & {"audio", "transcript"})
+    if audio_requested:
+        audio_hint = "Audio input is present." if clip_has_audio else "No audio input is available."
+    else:
+        audio_hint = "Audio analysis is not requested."
+
+    schema: Dict[str, Any] = {}
+    if "visual" in processes:
+        schema["narrative"] = (
+            "detailed description about what happens in the scene, the setting and the people present."
+        )
+    audio_schema = {}
+    if "transcript" in processes:
+        audio_schema["transcript"] = "best-effort transcript or empty string"
+    if "audio" in processes:
+        audio_schema["audio_narrative"] = (
+            "detailed description about what happens in the clip, making use of spoken tone and other sounds"
+        )
+    if audio_schema:
+        schema["audio_analysis"] = audio_schema
+
     return (
         "You are a television producer watching a TV show and logging the details of what happens in the show.\n"
         "You are analyzing one clip extracted from a larger episode.\n"
@@ -496,22 +522,9 @@ def build_analysis_prompt(clip_has_audio: bool,overarching_description: Optional
         f"{preceding_narrative_hint}"
         f"{audio_hint}\n"
         "Return JSON only with this schema:\n"
-        "{"
-        '"narrative": "detailed description about what happens in the scene, the setting and the people present.",'
-        # '"people": "description of the people present in the scene.",'
-        # '"setting": "description of the scene setting.",'
-        '"audio_analysis": {'
-        '"transcript": "best-effort transcript or empty string",'
-        # '"notable_sounds": ["sound 1", "sound 2"],'
-        # '"speaker_tone": "tone summary",'
-        # '"audio_context_notes": "extra observations from audio"'
-        '"audio_narrative": "detailed description about what happens in the clip, making use of the transcript, spoken tone and other sounds"'
-        "},"
-        # '"uncertainties": ["what is unclear or ambiguous"]'
-        "}\n"
+        f"{json.dumps(schema, ensure_ascii=False)}\n"
         "Rules:"
         " Use British English spelling, grammar and terms. "
-        # " based on provided frame timestamps."
     )
 
 
@@ -604,6 +617,24 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Optional shot detection",
     )
+    parser.add_argument(
+        "--shot-threshold",
+        type=float,
+        default=27.0,
+        help="ContentDetector sensitivity; higher = fewer/longer scenes",
+    )
+    parser.add_argument(
+        "--shot-min-scene-len",
+        type=float,
+        default=2,
+        help="Minimum scene length in seconds before a cut boundary is accepted",
+    )
+    parser.add_argument(
+        "--shot-max-scene-seconds",
+        type=float,
+        default=30,
+        help="Optional cap on scene length in seconds; longer scenes are split into equal sub-chunks",
+    )
     parser.add_argument("--seed", type=int, default=None, help="Optional seed for prediction style variance")
     parser.add_argument(
         "--overarching-narrative",
@@ -620,6 +651,16 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Optional output location for the analysis results.",
     )
+    parser.add_argument(
+        "--processes",
+        nargs="+",
+        choices=AVAILABLE_PROCESSES,
+        default=list(AVAILABLE_PROCESSES),
+        help=(
+            "Analysis outputs to produce; selecting audio also enables transcript "
+            "(default: visual audio transcript)"
+        ),
+    )
     return parser.parse_args()
 
 
@@ -629,14 +670,42 @@ def write_json(path: Path, payload: Dict[str, Any]) -> None:
         json.dump(payload, f, indent=2)
 
 
-def detect_shots(video_path, shot_detection=None):
+def _split_shot(start_time: float, end_time: float, max_scene_seconds: Optional[float]) -> List[Dict[str, float]]:
+    if not max_scene_seconds or (end_time - start_time) <= max_scene_seconds:
+        return [{"start": start_time, "end": end_time}]
+    chunks = []
+    t = start_time
+    while t < end_time:
+        sub_end = min(t + max_scene_seconds, end_time)
+        chunks.append({"start": t, "end": sub_end})
+        t = sub_end
+    return chunks
+
+
+def _video_duration_seconds(video_path) -> float:
+    cap = cv2.VideoCapture(str(video_path))
+    try:
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        fps = float(cap.get(cv2.CAP_PROP_FPS) or 0.0)
+    finally:
+        cap.release()
+    return (total_frames / fps) if fps > 0 else 0.0
+
+
+def detect_shots(video_path, shot_detection=None, threshold=27.0, min_scene_len=0.5, max_scene_seconds=None):
     from scenedetect import detect, ContentDetector
-    scene_list = detect(str(video_path), ContentDetector())
+    scene_list = detect(str(video_path), ContentDetector(threshold=threshold, min_scene_len=f"{min_scene_len}s"))
+
     shots = []
-    for scene in scene_list:
-        start_time = scene[0].get_seconds()
-        end_time = scene[1].get_seconds()
-        shots.append({"start": start_time, "end": end_time})
+    if not scene_list:
+        # No scene boundaries detected; treat the whole video as a single shot.
+        duration = _video_duration_seconds(video_path)
+        shots.extend(_split_shot(0.0, duration, max_scene_seconds))
+    else:
+        for scene in scene_list:
+            start_time = scene[0].get_seconds()
+            end_time = scene[1].get_seconds()
+            shots.extend(_split_shot(start_time, end_time, max_scene_seconds))
 
 
     #print out all the shots detected
@@ -648,6 +717,11 @@ def detect_shots(video_path, shot_detection=None):
 
 def main() -> int:
     args = parse_args()
+    selected_processes = set(args.processes)
+    if "audio" in selected_processes:
+        selected_processes.add("transcript")
+    use_audio = bool(selected_processes & {"audio", "transcript"})
+    use_visual = "visual" in selected_processes
     video_path = Path(args.video_path).expanduser().resolve()
     if not video_path.exists():
         raise RuntimeError(f"Input video not found: {video_path}")
@@ -667,8 +741,8 @@ def main() -> int:
     debug_log("Loading primary Gemma model...")
 
 
-    audio_array = extract_audio_for_model(video_path, 0, 5)
-    clip_has_audio = audio_array is not None
+    audio_array = extract_audio_for_model(video_path, 0, 5) if use_audio else None
+    clip_has_audio = use_audio and audio_array is not None
     debug_log(f"Audio detected: {clip_has_audio}")
 
     audio_runner = primary
@@ -685,7 +759,13 @@ def main() -> int:
     shot_list = []
     if args.shot_detection == "detect":
         #Do the shot detection
-        shot_list = detect_shots(video_path, args.shot_detection)
+        shot_list = detect_shots(
+            video_path,
+            args.shot_detection,
+            threshold=args.shot_threshold,
+            min_scene_len=args.shot_min_scene_len,
+            max_scene_seconds=args.shot_max_scene_seconds,
+        )
     elif args.shot_detection == "test":
         shot_list.append({"start": 0, "end": 20})
         shot_list.append({"start": 20, "end": 40})
@@ -705,25 +785,34 @@ def main() -> int:
 
 
         debug_log(f"Analyzing clip: {video_path}")
-        frames, frame_timestamps, decoded_duration = extract_frames(
-            video_path,
-            frames_per_chunk=args.frames,
-            chunk_seconds=args.chunk_seconds,
-            max_chunks=args.max_chunks,
-            max_total_frames=args.max_total_frames,
-            clip_start=shot["start"],
-            clip_end=shot["end"],
-        )
+        if use_visual:
+            frames, frame_timestamps, decoded_duration = extract_frames(
+                video_path,
+                frames_per_chunk=args.frames,
+                chunk_seconds=args.chunk_seconds,
+                max_chunks=args.max_chunks,
+                max_total_frames=args.max_total_frames,
+                clip_start=shot["start"],
+                clip_end=shot["end"],
+            )
+        else:
+            frames, frame_timestamps, decoded_duration = [], [], 0.0
 
-        #TODO - marry the audio up with the video shots
-        audio_array = extract_audio_for_model(
-            video_path,
-            start_seconds=shot["start"],
-            end_seconds=shot["end"],
-            max_seconds=args.audio_max_seconds,
-        )
+        audio_array = None
+        if use_audio:
+            audio_array = extract_audio_for_model(
+                video_path,
+                start_seconds=shot["start"],
+                end_seconds=shot["end"],
+                max_seconds=args.audio_max_seconds,
+            )
 
-        analysis_prompt = build_analysis_prompt(clip_has_audio=clip_has_audio, overarching_description=None, preceding_narrative=None)
+        analysis_prompt = build_analysis_prompt(
+            clip_has_audio=clip_has_audio,
+            overarching_description=None,
+            preceding_narrative=None,
+            processes=selected_processes,
+        )
         debug_log("Generating detailed clip narrative...")
         narrative_content = build_content(
             frames=frames,
@@ -750,7 +839,8 @@ def main() -> int:
             do_sample=True,
         )
         analysis_json = extract_json_object(analysis_raw)
-        analysis_json = normalize_audio_analysis_fields(analysis_json, clip_has_audio)
+        if use_audio:
+            analysis_json = normalize_audio_analysis_fields(analysis_json, clip_has_audio)
         debug_log("Analysis JSON normalized.")
 
 
@@ -762,23 +852,36 @@ def main() -> int:
             secs = seconds % 60
             return f"{hours:02}:{minutes:02}:{secs:06.3f}"
 
-        output_narrative: Dict[str, Any] = {
-            "start": format_timecode(shot["start"]), # change from seconds to timecode in format HH:MM:SS.mmm
-            "end": format_timecode(shot["end"]),
-            "caption": analysis_json.get("narrative", ""),
-        }
+        start_timecode = format_timecode(shot["start"])
+        end_timecode = format_timecode(shot["end"])
+        audio_analysis = analysis_json.get("audio_analysis", {})
 
-        output_audio_narrative: Dict[str, Any] = {
-            "start": format_timecode(shot["start"]),
-            "end": format_timecode(shot["end"]),
-            "caption": analysis_json["audio_analysis"].get("audio_narrative", ""),
-        }
+        if use_visual:
+            output_narrative: Dict[str, Any] = {
+                "start": start_timecode,
+                "end": end_timecode,
+                "caption": analysis_json.get("narrative", ""),
+            }
+            print(json.dumps(output_narrative, ensure_ascii=False, indent=2))
+            output_narrative_list.append(output_narrative)
 
-        output_transcript: Dict[str, Any] = {
-            "start": format_timecode(shot["start"]),
-            "end": format_timecode(shot["end"]),
-            "transcript": analysis_json["audio_analysis"].get("transcript", ""),
-        }
+        if "audio" in selected_processes:
+            output_audio_narrative: Dict[str, Any] = {
+                "start": start_timecode,
+                "end": end_timecode,
+                "caption": audio_analysis.get("audio_narrative", ""),
+            }
+            print(json.dumps(output_audio_narrative, ensure_ascii=False, indent=2))
+            output_audio_narrative_list.append(output_audio_narrative)
+
+        if "transcript" in selected_processes:
+            output_transcript: Dict[str, Any] = {
+                "start": start_timecode,
+                "end": end_timecode,
+                "transcript": audio_analysis.get("transcript", ""),
+            }
+            print(json.dumps(output_transcript, ensure_ascii=False, indent=2))
+            output_transcript_list.append(output_transcript)
 
         # output_payload: Dict[str, Any] = {
         #     "created_at": datetime.utcnow().isoformat() + "Z",
@@ -801,35 +904,23 @@ def main() -> int:
         # print(json.dumps(output_payload, ensure_ascii=False, indent=2))
 
 
-        print(json.dumps(output_narrative, ensure_ascii=False, indent=2))
-        print(json.dumps(output_audio_narrative, ensure_ascii=False, indent=2))
-        print(json.dumps(output_transcript, ensure_ascii=False, indent=2))
-
-        output_narrative_list.append(output_narrative)
-        output_audio_narrative_list.append(output_audio_narrative)
-        output_transcript_list.append(output_transcript)
-
         if args.output:
-            #Write the three outputs to the specified output location with relevant extensions
             output_path = Path(args.output).expanduser().resolve()
-            output_path_narrative = Path(str(output_path) + "_gemma_visual_output.json")
-            output_path_audio_narrative = Path(str(output_path) + "_gemma_audio_output.json")
-            output_path_transcript = Path(str(output_path) + "_gemma_transcript_output.json")
-
-            write_json(output_path_narrative, output_narrative_list)
-            write_json(output_path_audio_narrative, output_audio_narrative_list)
-            write_json(output_path_transcript, output_transcript_list)
+            if use_visual:
+                write_json(Path(str(output_path) + "_gemma_visual_output.json"), output_narrative_list)
+            if "audio" in selected_processes:
+                write_json(Path(str(output_path) + "_gemma_audio_output.json"), output_audio_narrative_list)
+            if "transcript" in selected_processes:
+                write_json(Path(str(output_path) + "_gemma_transcript_output.json"), output_transcript_list)
 
     if args.output:
-        #Write the three outputs to the specified output location with relevant extensions
         output_path = Path(args.output).expanduser().resolve()
-        output_path_narrative = Path(str(output_path) + "_gemma_visual_output.json")
-        output_path_audio_narrative = Path(str(output_path) + "_gemma_audio_output.json")
-        output_path_transcript = Path(str(output_path) + "_gemma_transcript_output.json")
-
-        write_json(output_path_narrative, output_narrative_list)
-        write_json(output_path_audio_narrative, output_audio_narrative_list)
-        write_json(output_path_transcript, output_transcript_list)
+        if use_visual:
+            write_json(Path(str(output_path) + "_gemma_visual_output.json"), output_narrative_list)
+        if "audio" in selected_processes:
+            write_json(Path(str(output_path) + "_gemma_audio_output.json"), output_audio_narrative_list)
+        if "transcript" in selected_processes:
+            write_json(Path(str(output_path) + "_gemma_transcript_output.json"), output_transcript_list)
 
 
 
