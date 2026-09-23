@@ -51,14 +51,7 @@ app.conf.update(
 
 
 # --- Download Task ---
-@app.task(
-    name="tasks.download_file",
-    bind=True,
-    autoretry_for=(Exception,),
-    max_retries=3,
-    retry_backoff=True,
-    retry_backoff_max=60,
-)
+@app.task(name="tasks.download_file", bind=True)
 def download_file(self, path, job_id, prompts=None):
     output_dir = os.path.join(shared_path, job_id)
     os.makedirs(output_dir, exist_ok=True)
@@ -235,19 +228,16 @@ def process_audio(payload):  # change filepath to dict inputs
 def finalize_results(job_id, job_type="full", callback_url=None, expects=None):
     """Merge a job's outputs, write task_info.txt, and report success.
 
-    `expects` names which results must be present for the job to count as a
-    success, e.g. ["audio", "visual"]. A DAG workflow declares it on the
-    finalize node:
+    `expects` is required and names which results must be present for the
+    job to count as a success, e.g. ["audio", "visual"]. A DAG workflow
+    declares it on the finalize node:
 
         {"id": "final", "task": "finalize_results",
          "kwargs": {"expects": ["audio", "visual"]}, "depends_on": [...]}
 
-    When it is omitted, the legacy per-job_type table below is used, so the
-    hardcoded chains in controller/main.py keep their exact semantics. A
-    workflow registered under a name that is not one of those legacy job
-    types must declare `expects` — otherwise there is no way to know what
-    "done" means for it, and the job used to fail at the final node even
-    though every other node had succeeded.
+    Without `expects` there is no way to know what "done" means for a
+    workflow, so the job fails at the final node even though every other
+    node had succeeded.
     """
 
     workspace = os.path.join(shared_path, job_id)
@@ -285,22 +275,10 @@ def finalize_results(job_id, job_type="full", callback_url=None, expects=None):
         "tagging": tagging_data,
     }
 
-    LEGACY_EXPECTATIONS = {
-        "full": ["audio", "visual"],
-        "audio_only": ["audio"],
-        "visual_only": ["visual"],
-        "summarise": ["summarise", "tagging"],
-        "speaker-extent-summarise": ["extent", "summarise", "tagging"],
-        "utterance-extent-summarise": ["extent", "summarise", "tagging"],
-        "tagging": ["tagging"],
-    }
-
-    if expects is None:
-        expects = LEGACY_EXPECTATIONS.get(job_type)
     if expects is None:
         raise ValueError(
-            f"job_type '{job_type}' has no built-in success criteria. Declare "
-            f"kwargs.expects on the finalize node of its workflow, e.g. "
+            f"job_type '{job_type}' has no 'expects' — the workflow's finalize node "
+            f"must declare kwargs.expects, e.g. "
             f'"kwargs": {{"expects": {sorted(produced)}}}.'
         )
 
@@ -495,7 +473,7 @@ def segment_extent(payload):
     first = segments[0]
     last = segments[len(segments) - 1]
     start_ms = first.get("startMs", 0)
-    end_ms = last.get("endMs", 0)
+    end_ms = last.get("endMs", 0) 
 
     if start_ms > end_ms:
         start_ms = end_ms
@@ -546,11 +524,11 @@ def execute_workflow(self, workflow_path, job_id, path, prompts=None, job_type="
         callback_url=callback_url,
         job_inputs={"path": path, "prompts": prompts},
         on_failure=parser.settings.get("on_failure", "stop"),
-        # Node-level retry. The legacy chains get this from
-        # @app.task(autoretry_for=...), which does not engage on the DAG path
-        # because the python driver calls the task's function directly — and
-        # a Celery-level retry of execute_workflow would re-run the whole DAG
-        # rather than the one node that failed.
+        # Node-level retry. Celery's @app.task(autoretry_for=...) never engages
+        # on the DAG path because the python driver calls a task's function
+        # directly rather than dispatching it — and a Celery-level retry of
+        # execute_workflow would re-run the whole DAG rather than the one
+        # node that failed.
         retries=parser.settings.get("retries", 0),
         retry_backoff=parser.settings.get("retry_backoff", 1.0),
         retry_backoff_max=parser.settings.get("retry_backoff_max", 60.0),
@@ -568,9 +546,9 @@ def execute_workflow(self, workflow_path, job_id, path, prompts=None, job_type="
         engine.execute()
 
     # Per-node envelopes go to the workspace rather than into the task
-    # result, so /status returns the same shape for DAG jobs as it does for
-    # the legacy chains (finalize's merged output) without losing the
-    # node-level detail that makes a failed run diagnosable.
+    # result, so /status returns the one /status contract (the terminal
+    # node's merged output) without losing the node-level detail that makes
+    # a failed run diagnosable.
     try:
         save_to_disk(job_id, "dag_run.json", engine.run_summary())
     except Exception as e:

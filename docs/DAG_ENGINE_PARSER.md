@@ -107,11 +107,14 @@ running log of this evolution.
   function, http nodes declare a `url`, `retries` is a valid non-negative
   int, and a node declaring `service` has a valid `DEPLOYMENT_MODE`.
 - `execute_node()` reads a node's `driver` (default `"python"`), builds
-  its `inputs` (job-context kwargs for `download_file`/`finalize_results`,
-  or the merged predecessor payload plus static `kwargs` for everything
-  else), and dispatches to `dag/drivers/python.py` or `dag/drivers/http.py`
-  — both always return an envelope, so the engine never branches on driver
-  type past this point.
+  its `inputs` via `_build_node_inputs()` — a node declaring `call: "kwargs"`
+  reads a slice of the engine's job context (`path`, `prompts`, `job_id`,
+  `job_type`, `callback_url`) named in its `inject` list, checked against
+  `requires`; every other node gets the merged predecessor payload plus its
+  static `kwargs` — and dispatches to `dag/drivers/python.py` or
+  `dag/drivers/http.py`. Both always return an envelope, so the engine never
+  branches on driver type past this point. Node input shape is declarative:
+  the engine never keys off a task's name.
 - If a node declares `service`, the driver call is wrapped by
   `dag/readiness.py`'s `ensure_ready`/`release` — reference-counted,
   re-entrant per thread, concurrency-capped per service
@@ -129,16 +132,20 @@ running log of this evolution.
   order — same algorithm since the original commit, now actually
   reachable in production via `worker/tasks.py`'s `if
   parser.settings.get("parallel", False)` branch.
-- `terminal_result()` returns `finalize_results`'s merged output when a
-  workflow has one (matching the legacy chains' `/status` shape); the full
-  per-node envelope map otherwise. `run_summary()` (order, executed set,
-  per-node envelopes) is written to `{job_id}/dag_run.json` regardless, so
-  node-level detail is never lost even when the wire response is the
-  merged summary.
+- `terminal_result()` returns the merged output of the workflow's
+  `terminal: true` node (the summary/finalize step) when one is declared,
+  matching the legacy chains' `/status` shape; the full per-node envelope map
+  is returned otherwise. `run_summary()` (order, executed set, per-node
+  envelopes) is written to `{job_id}/dag_run.json` regardless, so node-level
+  detail is never lost even when the wire response is the merged summary.
 
-**Two registered workflows exercise this today**: `full_pipeline`
+**Eight registered workflows exercise this today**: `full`
 (sequential, `process_visual`/`process_audio` as python-driver nodes that
-self-manage their own service lifecycle) and `full_pipeline_http`
+self-manage their own service lifecycle) and `full_http`
 (`settings.parallel: true`, `visual`/`audio` as sibling http-driver nodes
-whose lifecycle is entirely engine-managed via `service`). Both have run
-successfully against the real GPU stack.
+whose lifecycle is entirely engine-managed via `service`), plus the six
+chain-equivalent templates re-added from the retired `build_chain()` paths —
+`audio_only`, `visual_only`, `tagging`, `summarise`,
+`speaker-extent-summarise`, and `utterance-extent-summarise` — which
+restore the legacy `job_type` names as registered workflows. The first two
+have run successfully against the real GPU stack.

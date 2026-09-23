@@ -37,7 +37,7 @@ curl -X POST http://localhost:9000/process \
 # Register a DAG workflow template (name + version come from the body)
 curl -X POST http://localhost:9000/workflows \
   -H 'Content-Type: application/json' \
-  --data-binary @workflows/full_pipeline_1.0.json
+  --data-binary @workflows/full_1.0.json
 
 # Poll for status
 curl http://localhost:9000/status/<job_id>
@@ -75,14 +75,11 @@ mkdir -p ./weights/models
 ```
 POST /process (controller)   # JSON body: {path, job_type, prompts, callback_url, version}
   ↓
-job_type in workflows/registry.json?
-  ├─ yes -> tasks.execute_workflow  (DAG engine, dag/engine.py)
-  └─ no  -> build_chain()           (legacy hardcoded Celery chain)
+job_type must be a registered workflow (workflows/registry.json, added via POST /workflows)
+  └─ yes -> tasks.execute_workflow  (DAG engine, dag/engine.py)
   ↓
-Celery chain dispatched to Redis (sequential, NOT a chord):
-  download_file → process_visual → process_audio → finalize_results
-  ↓
-Worker executes tasks:
+Engine dispatches nodes in topological order (sequential by default, or parallel
+per settings.parallel):
   ├─ download_file: S3 / HTTP(S) / local → /app/tmp/{job_id}/
   ├─ process_visual: starts visualservice container → /analyze (XML→JSON)
   └─ process_audio: starts audioservice container → /process_audio/
@@ -95,11 +92,12 @@ GET /status/{job_id} returns results (or callback_url receives them)
 ### Key Design Decisions
 
 - **`download_file` lives in the worker** (not controller) so the downloaded file lands on the shared volume accessible to the analysis tasks.
-- **Audio and visual run sequentially today.** `build_chain()` builds a Celery *chain*, not a chord — nothing in the current code runs them concurrently. `DAGEngine.execute_parallel()` exists and is safe with respect to service occupancy (see leases below), but is not enabled yet: it still needs an aggregate VRAM feasibility check, since a per-service lease does not stop two *different* GPU services being jointly resident beyond host capacity.
+- **Audio and visual run sequentially today.** The `<em>node</em>` chain is a sequential one by default — nothing in the current default workflows runs them concurrently. `DAGEngine.execute_parallel()` exists and is safe with respect to service occupancy (see leases below), but is not enabled by default: it still needs an aggregate VRAM feasibility check, since a per-service lease does not stop two *different* GPU services being jointly resident beyond host capacity.
 - **Service leases (`dag/readiness.py`):** `ensure_ready`/`release` are reference-counted, re-entrant per thread, and capped by a per-service `concurrency` (default 1, overridable with the `SERVICE_CONCURRENCY` env var as JSON). The container starts on the first holder and stops on the last, so the engine's bracket around a node declaring `service` and the task body's own bracket nest into a single start/stop rather than cycling the container twice. A queued waiter inherits a running service instead of it being stopped and cold-started again. These are in-process locks: they cover threads in one worker process, not multiple workers or hosts.
-- **`finalize_results` success criteria are declarative.** A workflow's finalize node declares `kwargs.expects` (e.g. `["audio", "visual"]`). Without it, the legacy per-`job_type` table applies, so the hardcoded chains keep their exact semantics — but a workflow registered under a name that is not a legacy `job_type` must declare `expects`, or the job fails at the final node.
+- **Node inputs are declared, not inferred.** The engine never keys off a task's name to decide how to call it. Every node defaults to the merged-predecessor-payload convention; a node opts out with `call: "kwargs"` and reads a slice of the job context (`path`, `prompts`, `job_id`, `job_type`, `callback_url`) named in its `inject` list, with `requires` failing the node fast if any such key is missing. The workflow's summary node is flagged `terminal: true` — that node's output is the `/status` result.
+- **`finalize_results` success criteria are declarative and required.** A workflow's finalize node must declare `kwargs.expects` (e.g. `["audio", "visual"]`) — without it there's no way to know what "done" means, and the job fails at the final node even though every other node succeeded.
 - **Retries are per node, in the engine, not per Celery task.** `tasks.execute_workflow` is a *single* Celery task covering the whole DAG, so a Celery-level retry would re-run every node — including the expensive GPU ones — to recover from one transient download. Celery's `@app.task(autoretry_for=...)` also never engages on the DAG path at all, because the python driver calls a task's function directly rather than dispatching it. A workflow sets `settings.retries` as a default and overrides it per node with a `retries` attribute; `settings.retry_backoff`/`retry_backoff_max` control the doubling delay. A retry re-attempts the whole bracket including service acquisition, so a node whose service failed to start gets a fresh cold start — and its side effects run again, so only declare retries on nodes that tolerate that.
-- **One `/status` contract.** Both paths return `finalize_results`'s merged output. DAG jobs additionally write per-node envelopes to `{job_id}/dag_run.json` in the workspace, so node-level detail is available for debugging without changing the wire shape.
+- **One `/status` contract.** A workflow's `terminal: true` node's merged output is what `/status` returns (via `finalize_results`, matching the shape the legacy chains returned). Jobs additionally write per-node envelopes to `{job_id}/dag_run.json` in the workspace, so node-level detail is available for debugging without changing the wire shape.
 - **The visual API key self-heals.** `ensure_api_key()` caches the key in `API_KEY_PATH/api.key`, but `process_visual` regenerates it and retries once on a 401/403. Without that, a service that had forgotten or rotated its keys — its store is `shared/api-data`, which any volume reset wipes — would reject the cached key on every future job forever.
 - **`PYTHONPATH=/app` is required in both images.** Celery's app loader puts the working directory on `sys.path` only while importing the app module, then removes it — so any import that happens later (inside a task body) fails without it.
 - **On-demand containers:** the worker dynamically starts/stops on-demand services (`audioservice`, `visualservice`, `transcriptservice`) via the Docker Python SDK using the host Docker socket (`/var/run/docker.sock`). Health checks poll for 330s before timing out.

@@ -143,15 +143,10 @@ curl -X POST "http://localhost:9000/process" \
   -H "Content-Type: application/json" \
   -d '{"path": "/app/data/video.mp4"}'
 
-# Audio only
+# Runs a specific registered workflow (register first, see §5)
 curl -X POST "http://localhost:9000/process" \
   -H "Content-Type: application/json" \
-  -d '{"path": "/app/data/video.mp4", "job_type": "audio_only"}'
-
-# Summarise (transcript analysis)
-curl -X POST "http://localhost:9000/process" \
-  -H "Content-Type: application/json" \
-  -d '{"path": "http://localhost:8000/49794ede-.../transcript?start=1781183300&end=1781183700", "job_type": "summarise", "prompts": "summarise key summarise"}'
+  -d '{"path": "/app/data/video.mp4", "job_type": "full"}'
 
 # With callback and prompts
 curl -X POST "http://localhost:9000/process" \
@@ -164,15 +159,15 @@ curl -X POST "http://localhost:9000/process" \
 | Field | Type | Default | Description |
 |---|---|---|---|
 | `path` | string | required | Media source: local path, HTTP/HTTPS URL, or S3 URI |
-| `job_type` | string | `"full"` | `full` / `audio_only` / `visual_only` / `summarise` |
+| `job_type` | string | `"full"` | Name of a registered DAG workflow (see `POST /workflows`) |
 | `prompts` | string | null | Custom analysis prompt passed to services |
 | `callback_url` | string | null | Webhook to POST results to on completion |
 
 Returns a `job_id` immediately. If `callback_url` is provided, results are also POSTed there when complete.
 
 Once the request is received, the Controller will:
-1. Validate `job_type` and generate a unique `job_id`
-2. Build the appropriate Celery chain and enqueue it
+1. Look up the registered workflow for `job_type` (optionally pinned by `version`) and generate a unique `job_id`
+2. Enqueue a single `execute_workflow` Celery task that runs the DAG
 3. Return `{"status": "submitted", "job_id": "...", "job_type": "..."}` immediately
 
 Note: The outputs (audio and visual analysis results, as well the task info) will be saved in the shared volume workspace under `/app/tmp/{job_id}/` before being returned to the client or sent to the callback URL. You can also check the outputs on the host machine by navigating to the corresponding directory in the shared volume (e.g., `/your/path/to/shared_vol/{job_id}/`) while the processing is still running or after it has completed. This can be useful for debugging or verifying intermediate results.
@@ -194,20 +189,57 @@ Returns combined JSON results once `is_ready` is `true`.
 
 ## 5. TASK ORCHESTRATION DETAILS
 
-The pipeline uses **Celery Chains** — tasks within a job execute sequentially. Multiple jobs run in parallel across the queue.
+Jobs dispatch through **registered DAG workflows**. `POST /workflows` validates and permanently registers a workflow template (name + version from its body); a subsequent `POST /process` with `job_type=<name>` runs the workflow's `latest` version (or the one pinned by `version`) as a single `execute_workflow` Celery task.
 
-**Job types and their chains:**
+```bash
+# Register a workflow template, then run it
+curl -X POST http://localhost:9000/workflows \
+  -H 'Content-Type: application/json' \
+  --data-binary @workflows/full_1.0.json
 
-| `job_type` | Chain | Success condition |
-|---|---|---|
-| `full` | `download_file` → `process_visual` → `process_audio` → `finalize_results` | both audio + visual present |
-| `audio_only` | `download_file` → `process_audio` → `finalize_results` | audio present |
-| `visual_only` | `download_file` → `process_visual` → `finalize_results` | visual present |
-| `summarise` | `download_file` → `process_summarise` | transcript service returns result |
+curl -X POST http://localhost:9000/process \
+  -H 'Content-Type: application/json' \
+  -d '{"path": "/app/data/video.mp4", "job_type": "full"}'
+```
 
-For `full`, `audio_only`, and `visual_only`, `finalize_results` runs last: it merges output JSON files from the shared volume, writes `task_info.txt`, deletes the raw video on success, and optionally POSTs to `callback_url`.
+Eight workflow templates ship pre-registered in `workflows/registry.json`
+(mount `./workflows` into the containers at `/app/workflows`):
 
-For `transcript`, `process_summarise` is the terminal task. It calls `transcriptservice` with the `job_id`, which locates the downloaded file on the shared volume directly. The result is stored in Redis under `job_id` and retrievable via `/status/{job_id}`.
+- `full` — `download` → `visual` → `audio` → `final` — expects audio + visual
+- `full_http` — `download` → parallel http `visual`/`audio`, no terminal node
+- `audio_only` — `download` → `audio` → `final`
+- `visual_only` — `download` → `visual` → `final`
+- `tagging` — `download` → `transcript` → `tagging` → `final`
+- `summarise` — `download` → `transcript` → `summarise` → `tagging` → `final`
+- `speaker-extent-summarise` — adds `extent` (speaker) before `transcript`
+- `utterance-extent-summarise` — adds `extent` (segment) before `transcript`
+
+A workflow template declares its nodes with `id`, `task` (a function in `worker/tasks.py`, or the HTTP driver via `url`), `depends_on`, and optional `service` / `retries`. Node input is declarative, never keyed on a task's name:
+
+| Node attribute | Meaning |
+|---|---|
+| `call: "kwargs"` | Node reads a job-context slice instead of the merged predecessor payload (`inject` below). Default is the merged-payload convention. |
+| `inject: [...]` | For `call: "kwargs"` nodes — which job-context keys (`path`, `prompts`, `job_id`, `job_type`, `callback_url`, ...) to pass in; job context wins over template `kwargs` defaults. |
+| `requires: [...]` | For `call: "kwargs"` nodes — keys that must resolve at pre-flight, or the job fails fast. |
+| `terminal: true` | The node whose output is the job's `/status` result (a workflow's summary/finalize step). |
+| `service` / `retries` | GPU service to acquire for the node; engine-level retry count. |
+
+For example, `workflows/full_1.0.json`:
+
+```json
+{ "id": "download", "task": "download_file", "call": "kwargs",
+  "inject": ["path", "prompts", "job_id"], "requires": ["path"] },
+{ "id": "visual", "task": "process_visual", "service": "visualservice",
+  "depends_on": ["download"] },
+{ "id": "audio", "task": "process_audio", "service": "audioservice",
+  "depends_on": ["visual"] },
+{ "id": "final", "task": "finalize_results", "call": "kwargs",
+  "inject": ["job_id", "job_type", "callback_url"], "terminal": true,
+  "kwargs": { "expects": ["audio", "visual"] },
+  "depends_on": ["visual", "audio"] }
+```
+
+`finalize_results` merges the job's output JSON files from the shared volume, writes `task_info.txt`, deletes the raw video on success, and optionally POSTs to `callback_url`. Its success criteria are declarative via `kwargs.expects`; a workflow must declare `expects`, or the job fails at the final node.
 
 The full workflow is demonstrated in the following diagram:
 
@@ -221,9 +253,10 @@ The full workflow is demonstrated in the following diagram:
                             ▼
 ┌─────────────────────────────────────────────────────────────────────┐
 │                     CONTROLLER  :9000                               │
-│  FastAPI — generates job_id, builds chain, calls .apply_async()     │
+│  FastAPI — looks up registered workflow, generates job_id, enqueues │
+│  a single execute_workflow task via .apply_async()                  │
 └───────────────────────────┬─────────────────────────────────────────┘
-                            │ enqueue chain
+                            │ enqueue execute_workflow
                             ▼
 ┌─────────────────────────────────────────────────────────────────────┐
 │                     REDIS  :6379                                    │
@@ -236,42 +269,35 @@ The full workflow is demonstrated in the following diagram:
 ┌─────────────────────────────────────────────────────────────────────┐
 │                      WORKER  (Celery)                               │
 │                                                                     │
-│  Per-job sequential chain:                                          │
+│  Per-job DAG (settings.parallel: false → sequential, else           │
+│  topological generations run concurrently):                         │
 │                                                                     │
 │  ① download_file                                                    │
 │     S3 / HTTP(S) / local → /app/tmp/{job_id}/{filename}            │
 │     returns: {file_path, job_id, prompts}                           │
 │            │                                                        │
 │            ▼                                                        │
-│  ② process_visual  (skipped for audio_only / summarise)              │
-│     starts visualservice → POST /analyze (upload video)            │
+│  ② process_visual  (if the workflow has a visual node)             │
+│     acquires visualservice → POST /analyze (upload video)          │
 │     parses XML → flat caption segments                              │
 │     saves {name}_visual_output.json                                 │
-│     stops visualservice                                             │
-│     returns: {file_path, job_id, prompts, visual_result}           │
 │            │                                                        │
 │            ▼                                                        │
-│  ③ process_audio  (skipped for visual_only / summarise)              │
-│     starts audioservice → POST /process_audio/                     │
+│  ③ process_audio  (if the workflow has an audio node)              │
+│     acquires audioservice → POST /process_audio/                   │
 │     passes visual_result as chunk boundaries                        │
 │     saves {name}_audio_output.json                                  │
-│     stops audioservice                                              │
 │            │                                                        │
 │            ▼                                                        │
-│  ② process_summarise  (summarise only, replaces audio + visual)      │ 
-│     starts transcriptservice → POST /process/                       │
-│     service locates file via job_id on shared volume                │
-│     stops transcriptservice                                         │
-│     stores result in Redis under job_id  ← terminal task           │
-│            │                                                        │
-│            ▼                                                        │
-│  ④ finalize_results  (full / audio_only / visual_only only)        │
+│  ④ finalize_results  (the terminal node)                           │
 │     merges audio + visual JSON from shared volume                   │
-│     evaluates success per job_type                                  │
+│     evaluates success per kwargs.expects                            │
 │     writes task_info.txt                                            │
 │     deletes raw video on success                                    │
 │     POST callback_url (if provided)                                 │
 │     stores final_output in Redis under job_id                       │
+│                                                                     │
+│  Per-node envelopes are written to {job_id}/dag_run.json            │
 └───────────────────────────┬─────────────────────────────────────────┘
                             │
               ┌─────────────┴──────────────┐
@@ -286,10 +312,10 @@ The full workflow is demonstrated in the following diagram:
 │                                                                     │
 │  /app/tmp/{job_id}/                                                 │
 │    ├── video.mp4                  (deleted on success)              │
-│    ├── video_visual_output.json   (full / visual_only)              │
-│    ├── video_audio_output.json    (full / audio_only)               │
-│    ├── summarise_output.json      (summarise)                       │
-│    └── task_info.txt              (full / audio_only / visual_only) │
+│    ├── video_visual_output.json                                     │
+│    ├── video_audio_output.json                                      │
+│    ├── dag_run.json              (per-node envelopes + order)       │
+│    └── task_info.txt                                                │
 └─────────────────────────────────────────────────────────────────────┘
 ```
 

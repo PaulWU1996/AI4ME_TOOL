@@ -15,14 +15,6 @@ DRIVERS = {
     "http": http_driver,
 }
 
-# Nodes whose task doesn't follow the payload-in/payload-out convention used
-# by everything else in worker/tasks.py — they need job context (job_id,
-# request input, job_type/callback_url) instead of a merged predecessor
-# payload. Kept as an explicit set (rather than threading job context
-# through node attributes generically) so drivers/* stay simple, generic
-# callers with no knowledge of DAGEngine's job-level state.
-NON_PAYLOAD_TASKS = {"download_file", "finalize_results"}
-
 
 class PayloadConflictError(Exception):
     """Raised when two predecessors of a node disagree on the same payload key."""
@@ -52,6 +44,17 @@ class DAGEngine:
         {"path": ..., "prompts": ...}), analogous to `ProcessRequest` in
         controller/main.py. Distinct from a node's static `kwargs` in the
         workflow JSON, which describe the reusable pipeline template.
+
+        Every node builds its `inputs` from `_build_node_inputs()`:
+        - a node declaring `call: "kwargs"` reads a slice of the job context
+          (`job_inputs` + `job_id`/`job_type`/`callback_url`) via its
+          `inject` list, over static `kwargs` defaults — this is how a
+          download node picks up the request's `path`/`prompts`, and a
+          finalize node picks up `job_id`/`job_type`/`callback_url`, without
+          the engine knowing their task names. `requires` fails the node
+          fast if any named key is missing after the merge.
+        - any other node (the default) receives the merged predecessor
+          payload plus its static `kwargs`, unchanged.
 
         on_failure: "stop" (default) halts the whole run on the first
         failed node; "continue" logs the failure and keeps walking the
@@ -90,6 +93,12 @@ class DAGEngine:
         self.job_type = job_type
         self.callback_url = callback_url
         self.job_inputs = job_inputs or {}
+        self.job_context = {
+            **self.job_inputs,
+            "job_id": job_id,
+            "job_type": job_type,
+            "callback_url": callback_url,
+        }
         self.on_failure = on_failure
         self.retries = retries
         self.retry_backoff = retry_backoff
@@ -126,12 +135,15 @@ class DAGEngine:
                     raise UnknownTaskError(
                         f"No function '{func_name}' in module '{module_name}' (node '{node_id}')."
                     )
-                if func_name == 'download_file':
-                    static_kwargs = attrs.get('kwargs', {})
-                    if not self.job_inputs.get('path', static_kwargs.get('path')):
+                if attrs.get('call') == 'kwargs':
+                    # A kwargs node reads job context, so its `requires`
+                    # keys must already be satisfiable at pre-flight time.
+                    inputs = self._build_node_inputs(node_id)
+                    missing = [k for k in attrs.get('requires', []) if inputs.get(k) is None]
+                    if missing:
                         raise UnknownTaskError(
-                            f"Node '{node_id}' (download_file) has no 'path' — "
-                            "supply one via job_inputs (the request) or the node's kwargs."
+                            f"Node '{node_id}' is missing required inputs {missing} — "
+                            "supply them via job_inputs (the request) or the node's kwargs."
                         )
             elif driver_name == 'http' and not attrs.get('url'):
                 raise UnknownTaskError(f"Node '{node_id}' (http driver) has no 'url' attribute.")
@@ -172,6 +184,37 @@ class DAGEngine:
                 merged[key] = value
         return merged
 
+    def _build_node_inputs(self, node_id):
+        """Build the `inputs` dict handed to a node's driver.
+
+        A node declaring `call: "kwargs"` gets its static `kwargs` merged
+        with the slice of job context named in its `inject` list — job
+        context wins over template defaults, and a key the context doesn't
+        hold simply leaves the template's own value in place. Every other
+        node (the default) gets the merged predecessor payload plus its
+        static `kwargs`, with conflicts rejected.
+        """
+        attributes = self.dag.get_node_attributes(node_id)
+        static_kwargs = attributes.get('kwargs', {})
+
+        if attributes.get('call') == 'kwargs':
+            inject = attributes.get('inject', [])
+            return {
+                **static_kwargs,
+                **{k: self.job_context[k]
+                   for k in inject if self.job_context.get(k) is not None},
+            }
+
+        payload = self._merge_predecessor_payloads(node_id)
+        for key, value in static_kwargs.items():
+            if key in payload and payload[key] != value:
+                raise PayloadConflictError(
+                    f"Node '{node_id}': static kwargs disagree with predecessor output on "
+                    f"'{key}' ({payload[key]!r} vs {value!r})"
+                )
+            payload[key] = value
+        return payload
+
     def _attempt_node(self, node_id, node_attributes, driver, call_attributes, inputs):
         """One attempt at a node: acquire its service if it declares one, run
         the driver, release. Always returns an envelope, never raises for a
@@ -198,44 +241,13 @@ class DAGEngine:
         if driver is None:
             raise UnknownTaskError(f"Unknown driver '{driver_name}' (node '{node_id}').")
 
-        static_kwargs = node_attributes.get('kwargs', {})
-
-        if task_name in NON_PAYLOAD_TASKS:
-            if task_name == 'download_file':
-                # Runtime request input takes priority over any static
-                # default in the workflow JSON (useful for testing a
-                # template without a real request).
-                path = self.job_inputs.get('path', static_kwargs.get('path'))
-                prompts = self.job_inputs.get('prompts', static_kwargs.get('prompts'))
-                if not path:
-                    raise ValueError(
-                        f"Node '{node_id}' (download_file) has no 'path' — "
-                        "supply one via job_inputs (the request) or the node's kwargs."
-                    )
-                computed = {'path': path, 'job_id': self.job_id, 'prompts': prompts}
-            else:  # finalize_results
-                computed = {
-                    'job_id': self.job_id,
-                    'job_type': self.job_type,
-                    'callback_url': self.callback_url,
-                }
-            # Static kwargs still reach these nodes, they just cannot override
-            # the job context the engine owns. This is how a finalize node
-            # declares `expects`, and how any future job-context task takes
-            # template-level configuration.
-            inputs = {**static_kwargs, **computed}
-            call_attributes = {**node_attributes, 'call': 'kwargs'}
-        else:
-            payload = self._merge_predecessor_payloads(node_id)
-            for key, value in static_kwargs.items():
-                if key in payload and payload[key] != value:
-                    raise PayloadConflictError(
-                        f"Node '{node_id}': static kwargs disagree with predecessor output on "
-                        f"'{key}' ({payload[key]!r} vs {value!r})"
-                    )
-                payload[key] = value
-            inputs = payload
-            call_attributes = {**node_attributes, 'call': 'payload'}
+        # Inputs are built declaratively (see _build_node_inputs): a node
+        # opts out of the merged-predecessor convention with `call: "kwargs"`
+        # and names the job-context slice it wants via `inject`. The drivers
+        # stay generic callers — this is the only place the engine branches
+        # on input shape, never on task name.
+        inputs = self._build_node_inputs(node_id)
+        call_attributes = dict(node_attributes)
 
         retries = node_attributes.get('retries', self.retries)
         envelope = None
@@ -269,17 +281,18 @@ class DAGEngine:
     def terminal_result(self):
         """The result a client should see for this job.
 
-        A workflow ending in finalize_results has a single meaningful output
-        — finalize's merged payload — and that is what the legacy Celery
-        chains return, so returning it here keeps one `/status` contract
-        across both paths. Workflows with no finalize node have no such
+        The node declaring `terminal: true` produces the job's single
+        meaningful output (the workflow's summary node, conventionally the
+        finalize step), and that is what the legacy Celery chains' final
+        task returned, so returning it here keeps one `/status` contract
+        across both paths. Workflows with no terminal node have no such
         summary, so the full node map is returned instead.
 
         The per-node envelopes are never lost: run_summary() writes them to
         the job workspace for debugging.
         """
         for node_id in reversed(self.dag.topological_sort()):
-            if self._task_name(node_id) == 'finalize_results':
+            if self.dag.get_node_attributes(node_id).get('terminal'):
                 envelope = self.node_results.get(node_id)
                 if envelope and envelope.get('status') == 'success':
                     return envelope.get('data')
