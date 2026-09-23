@@ -193,7 +193,7 @@ def get_speaker_turn_boundary_ms(segments: list[dict], index: int, search_direct
 
     return segments[i]["endMs"] if search_direction == "forward" else segments[i]["startMs"]
 
-def load_json_file(file_path):
+def load_json_file(file_path) -> dict | None:
     try:
         if not os.path.exists(file_path):
             return None

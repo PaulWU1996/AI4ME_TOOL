@@ -48,7 +48,7 @@
     {
       "id": "tagging",
       "task": "process_tags",
-      "service": "taggingservice",
+      "service": "transcriptservice",
       "depends_on": [
         "summarise"
       ]

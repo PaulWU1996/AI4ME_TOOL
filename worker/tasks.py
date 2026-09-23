@@ -1,29 +1,30 @@
+import glob
 import os
 import shutil
+from urllib.parse import parse_qs, urlparse
+
 import requests
 from celery import Celery
-from urllib.parse import urlparse, parse_qs
-import glob
 from consts import (
+    AUDIO_REQUEST_TIMEOUT,
+    SCRIPT_REQUEST_TIMEOUT,
+    VISUAL_REQUEST_TIMEOUT,
+    audio_api_url,
     redis_host,
     redis_port,
     shared_path,
-    visual_api_url,
-    audio_api_url,
-    summarise_api_url,
-    tagging_api_url,
+    transcript_api_url,
     transcript_text_file,
-    VISUAL_REQUEST_TIMEOUT,
-    AUDIO_REQUEST_TIMEOUT,
-    SCRIPT_REQUEST_TIMEOUT,
+    visual_api_url,
 )
 from utils import (
     ensure_api_key,
     extract_flat_captions,
-    save_to_disk,
     get_speaker_turn_boundary_ms,
-    load_json_file
+    load_json_file,
+    save_to_disk,
 )
+
 # Service lifecycle goes through the lease in dag/readiness.py rather than
 # calling utils.start_service/stop_service directly. The lease is
 # reference-counted and re-entrant, so when a task runs as a DAG node whose
@@ -80,8 +81,7 @@ def download_file(self, path, job_id, prompts=None):
             with requests.get(path, stream=True) as r:
                 r.raise_for_status()
                 with open(dest, "wb") as f:
-                    for chunk in r.iter_content(8192):
-                        f.write(chunk)
+                    f.writelines(r.iter_content(8192))
         elif os.path.exists(path):
             shutil.copy2(path, dest)
         else:
@@ -343,7 +343,7 @@ def finalize_results(job_id, job_type="full", callback_url=None, expects=None):
 
 def run_service_task(
     payload: dict,
-    task_type: str,
+    job_type: str,
     service_name: str,
     log_tag: str,
     file_suffix: str,
@@ -356,7 +356,7 @@ def run_service_task(
     """
     job_id = payload.get("job_id")
     result_template = {
-        "type": task_type,
+        "type": job_type,
         "success": False,
         "output": None,
         "error": None,
@@ -370,7 +370,7 @@ def run_service_task(
             api_url,
             json={
                 "job_id": job_id,
-                "job_type": "script",
+                "job_type": job_type,
                 "prompts": payload.get("prompts"),
             },
             timeout=SCRIPT_REQUEST_TIMEOUT,
@@ -398,12 +398,12 @@ def run_service_task(
 def process_summarise(payload):
     return run_service_task(
         payload=payload,
-        task_type="summarise",
+        job_type="summary",
         service_name="transcriptservice",
         log_tag="[Summarise Worker]",
         file_suffix="summarise_output",
         result_key="summarise_result",
-        api_url=summarise_api_url
+        api_url=transcript_api_url
     )
 
 
@@ -411,12 +411,12 @@ def process_summarise(payload):
 def process_tags(payload):
     return run_service_task(
         payload=payload,
-        task_type="tags",
-        service_name="taggingservice",
+        job_type="tagging",
+        service_name="transcriptservice",
         log_tag="[Tagging Worker]",
         file_suffix="tagging_output",
         result_key="tagging_result",
-        api_url=tagging_api_url
+        api_url=transcript_api_url
     )
 
 
@@ -425,7 +425,9 @@ def speaker_extent(payload):
     file_path = os.path.normpath(payload["file_path"])
     job_id = payload["job_id"]
 
-    transcript = load_json_file(file_path)
+    transcript: dict | None = load_json_file(file_path)
+    if not transcript:
+        raise ValueError("Failed to load transcript")
 
     segments = transcript.get("segments", [])
     if not segments:
