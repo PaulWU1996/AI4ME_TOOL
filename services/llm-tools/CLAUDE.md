@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this project does
 
-A containerized FastAPI service that an external orchestrator calls to process transcripts. Given a `job_id`, it reads `$SHARED_VOLUME_PATH/{job_id}/transcript.txt` from a shared volume, runs the text through a locally-running Ollama LLM, and returns a catchy title + bullet-point summary — also writing the result to `$SHARED_VOLUME_PATH/{job_id}/output.json`.
+A containerized FastAPI service that an external orchestrator calls to process transcripts. Given a `job_id` and a `job_type` (`summary` or `tagging`), it reads `$SHARED_VOLUME_PATH/{job_id}/transcript.txt` from a shared volume, runs the text through a locally-running Ollama LLM, and returns either a catchy title + summary or a list of tags — also writing the result to `$SHARED_VOLUME_PATH/{job_id}/output.json`.
 
 Ollama runs **inside the same container** as the FastAPI app (not a separate service). LLM models are **not bundled in the image** — they are bind-mounted from the host at `/root/.ollama/models`.
 
@@ -23,7 +23,7 @@ curl http://localhost:8000/health
 # Send a job (transcript must already exist at SHARED_VOLUME_PATH_HOST/<job_id>/transcript.txt)
 curl -X POST http://localhost:8000/process \
   -H 'Content-Type: application/json' \
-  -d '{"job_id": "test123"}'
+  -d '{"job_id": "test123", "job_type": "summary"}'
 ```
 
 There is no test suite yet. Manual verification steps are in [PLAN.md](PLAN.md#verification).
@@ -42,16 +42,16 @@ GET  /health   →  routers/process.py  →  services/ollama_client.py
 4. `exec uvicorn app.main:app` — replaces shell so Uvicorn receives signals directly
 
 **Request flow** (`routers/process.py`):
-1. Resolves `$SHARED_VOLUME_PATH/{job_id}/transcript.txt` — 404 if missing
-2. Checks `MAX_TRANSCRIPT_CHARS` limit (0 = no limit)
-3. Rejects `job_type` other than `script` — 422
+1. `job_type` is a Pydantic `Literal["summary", "tagging"]` on the request model — anything else is rejected by FastAPI's own validation with a 422 before the handler runs
+2. Resolves `$SHARED_VOLUME_PATH/{job_id}/transcript.txt` — 404 if missing
+3. Checks `MAX_TRANSCRIPT_CHARS` limit (0 = no limit) — 413 if exceeded
 4. Pings Ollama readiness — 503 if down
-5. Looks up the mode registry (`MODES`) by `req.mode` — prompts dir + response model
+5. Looks up the job-type registry (`JOB_TYPES`) by `req.job_type` — prompts dir + response model
 6. Calls `ollama_client.generate()` — async `httpx` POST to `/api/generate`, timeout 120s
-7. Validates the returned JSON shape per mode (`_validate_result`) — 500 if malformed
+7. Validates the returned JSON shape per job_type (`validate_result`) — 500 if malformed
 8. Writes `output.json` to the shared volume and returns the response model
 
-**Prompt** (`app/prompts/{mode}/transcript.txt`, e.g. `summary/` or `tagging/`): loaded at request time inside `_build_prompt`. Uses `str.format_map` with `{language}` slot. Double-braces (`{{`, `}}`) are literal `{}` escapes for format_map. The output JSON schema lives in `app/prompts/{mode}/output_structure.txt`. Adding a new mode = adding one entry to `MODES` in `routers/process.py` plus the two prompt files.
+**Prompt** (`app/prompts/{job_type}/transcript.txt`, e.g. `summary/` or `tagging/`): loaded at request time inside `_build_prompt`. Uses `str.format_map` with `{language}` slot. Double-braces (`{{`, `}}`) are literal `{}` escapes for format_map. The output JSON schema lives in `app/prompts/{job_type}/output_structure.txt`. Adding a new job_type = adding one entry to `JOB_TYPES` in `routers/process.py` plus the two prompt files.
 
 ## Key environment variables
 

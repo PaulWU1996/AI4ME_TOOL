@@ -67,13 +67,6 @@ async def process_transcript(req: ProcessRequest):
         "job received | job_id=%s job_type=%s language=%s", req.job_id, req.job_type, req.language
     )
 
-    if req.job_type not in JOB_TYPES:
-        logger.warning("rejected job_type | job_id=%s job_type=%s", req.job_id, req.job_type)
-        raise HTTPException(
-            status_code=422,
-            detail=f"job_type '{req.job_type}' is not handled by this service",
-        )
-
     transcript_path = _shared_path() / req.job_id / "transcript.txt"
 
     if not transcript_path.exists():
