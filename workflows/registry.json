@@ -1,17 +1,65 @@
 {
-  "full_pipeline": {
+  "full": {
     "latest": "1.0",
     "versions": {
       "1.0": {
-        "path": "/app/workflows/full_pipeline_1.0.json"
+        "path": "/app/workflows/full_1.0.json"
       }
     }
   },
-  "full_pipeline_http": {
+  "full_http": {
     "latest": "1.0",
     "versions": {
       "1.0": {
-        "path": "/app/workflows/full_pipeline_http_1.0.json"
+        "path": "/app/workflows/full_http_1.0.json"
+      }
+    }
+  },
+  "audio_only": {
+    "latest": "1.0",
+    "versions": {
+      "1.0": {
+        "path": "/app/workflows/audio_only_1.0.json"
+      }
+    }
+  },
+  "visual_only": {
+    "latest": "1.0",
+    "versions": {
+      "1.0": {
+        "path": "/app/workflows/visual_only_1.0.json"
+      }
+    }
+  },
+  "tagging": {
+    "latest": "1.0",
+    "versions": {
+      "1.0": {
+        "path": "/app/workflows/tagging_1.0.json"
+      }
+    }
+  },
+  "summarise": {
+    "latest": "1.0",
+    "versions": {
+      "1.0": {
+        "path": "/app/workflows/summarise_1.0.json"
+      }
+    }
+  },
+  "speaker-extent-summarise": {
+    "latest": "1.0",
+    "versions": {
+      "1.0": {
+        "path": "/app/workflows/speaker-extent-summarise_1.0.json"
+      }
+    }
+  },
+  "utterance-extent-summarise": {
+    "latest": "1.0",
+    "versions": {
+      "1.0": {
+        "path": "/app/workflows/utterance-extent-summarise_1.0.json"
       }
     }
   }

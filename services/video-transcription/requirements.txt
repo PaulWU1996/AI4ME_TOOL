@@ -1,0 +1,13 @@
+tqdm
+torch
+transformers
+accelerate
+Pillow
+numpy
+opencv-python
+soundfile
+librosa
+soundfile
+torchvision
+json-repair
+scenedetect[opencv]

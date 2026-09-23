@@ -1,0 +1,5 @@
+Respond ONLY in this exact JSON format with no extra text:
+{
+  "title": "<your title here>",
+  "summary": "<your summary here>"
+}

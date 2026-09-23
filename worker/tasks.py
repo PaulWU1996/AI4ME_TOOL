@@ -1,29 +1,30 @@
+import glob
 import os
 import shutil
+from urllib.parse import parse_qs, urlparse
+
 import requests
 from celery import Celery
-from urllib.parse import urlparse, parse_qs
-import glob
 from consts import (
+    AUDIO_REQUEST_TIMEOUT,
+    SCRIPT_REQUEST_TIMEOUT,
+    VISUAL_REQUEST_TIMEOUT,
+    audio_api_url,
     redis_host,
     redis_port,
     shared_path,
-    visual_api_url,
-    audio_api_url,
-    summarise_api_url,
-    tagging_api_url,
+    transcript_api_url,
     transcript_text_file,
-    VISUAL_REQUEST_TIMEOUT,
-    AUDIO_REQUEST_TIMEOUT,
-    SCRIPT_REQUEST_TIMEOUT,
+    visual_api_url,
 )
 from utils import (
     ensure_api_key,
     extract_flat_captions,
-    save_to_disk,
     get_speaker_turn_boundary_ms,
-    load_json_file
+    load_json_file,
+    save_to_disk,
 )
+
 # Service lifecycle goes through the lease in dag/readiness.py rather than
 # calling utils.start_service/stop_service directly. The lease is
 # reference-counted and re-entrant, so when a task runs as a DAG node whose
@@ -51,14 +52,7 @@ app.conf.update(
 
 
 # --- Download Task ---
-@app.task(
-    name="tasks.download_file",
-    bind=True,
-    autoretry_for=(Exception,),
-    max_retries=3,
-    retry_backoff=True,
-    retry_backoff_max=60,
-)
+@app.task(name="tasks.download_file", bind=True)
 def download_file(self, path, job_id, prompts=None):
     output_dir = os.path.join(shared_path, job_id)
     os.makedirs(output_dir, exist_ok=True)
@@ -87,8 +81,7 @@ def download_file(self, path, job_id, prompts=None):
             with requests.get(path, stream=True) as r:
                 r.raise_for_status()
                 with open(dest, "wb") as f:
-                    for chunk in r.iter_content(8192):
-                        f.write(chunk)
+                    f.writelines(r.iter_content(8192))
         elif os.path.exists(path):
             shutil.copy2(path, dest)
         else:
@@ -235,19 +228,16 @@ def process_audio(payload):  # change filepath to dict inputs
 def finalize_results(job_id, job_type="full", callback_url=None, expects=None):
     """Merge a job's outputs, write task_info.txt, and report success.
 
-    `expects` names which results must be present for the job to count as a
-    success, e.g. ["audio", "visual"]. A DAG workflow declares it on the
-    finalize node:
+    `expects` is required and names which results must be present for the
+    job to count as a success, e.g. ["audio", "visual"]. A DAG workflow
+    declares it on the finalize node:
 
         {"id": "final", "task": "finalize_results",
          "kwargs": {"expects": ["audio", "visual"]}, "depends_on": [...]}
 
-    When it is omitted, the legacy per-job_type table below is used, so the
-    hardcoded chains in controller/main.py keep their exact semantics. A
-    workflow registered under a name that is not one of those legacy job
-    types must declare `expects` — otherwise there is no way to know what
-    "done" means for it, and the job used to fail at the final node even
-    though every other node had succeeded.
+    Without `expects` there is no way to know what "done" means for a
+    workflow, so the job fails at the final node even though every other
+    node had succeeded.
     """
 
     workspace = os.path.join(shared_path, job_id)
@@ -285,22 +275,10 @@ def finalize_results(job_id, job_type="full", callback_url=None, expects=None):
         "tagging": tagging_data,
     }
 
-    LEGACY_EXPECTATIONS = {
-        "full": ["audio", "visual"],
-        "audio_only": ["audio"],
-        "visual_only": ["visual"],
-        "summarise": ["summarise", "tagging"],
-        "speaker-extent-summarise": ["extent", "summarise", "tagging"],
-        "utterance-extent-summarise": ["extent", "summarise", "tagging"],
-        "tagging": ["tagging"],
-    }
-
-    if expects is None:
-        expects = LEGACY_EXPECTATIONS.get(job_type)
     if expects is None:
         raise ValueError(
-            f"job_type '{job_type}' has no built-in success criteria. Declare "
-            f"kwargs.expects on the finalize node of its workflow, e.g. "
+            f"job_type '{job_type}' has no 'expects' — the workflow's finalize node "
+            f"must declare kwargs.expects, e.g. "
             f'"kwargs": {{"expects": {sorted(produced)}}}.'
         )
 
@@ -365,7 +343,7 @@ def finalize_results(job_id, job_type="full", callback_url=None, expects=None):
 
 def run_service_task(
     payload: dict,
-    task_type: str,
+    job_type: str,
     service_name: str,
     log_tag: str,
     file_suffix: str,
@@ -378,7 +356,7 @@ def run_service_task(
     """
     job_id = payload.get("job_id")
     result_template = {
-        "type": task_type,
+        "type": job_type,
         "success": False,
         "output": None,
         "error": None,
@@ -392,7 +370,7 @@ def run_service_task(
             api_url,
             json={
                 "job_id": job_id,
-                "job_type": "script",
+                "job_type": job_type,
                 "prompts": payload.get("prompts"),
             },
             timeout=SCRIPT_REQUEST_TIMEOUT,
@@ -420,12 +398,12 @@ def run_service_task(
 def process_summarise(payload):
     return run_service_task(
         payload=payload,
-        task_type="summarise",
+        job_type="summary",
         service_name="transcriptservice",
         log_tag="[Summarise Worker]",
         file_suffix="summarise_output",
         result_key="summarise_result",
-        api_url=summarise_api_url
+        api_url=transcript_api_url
     )
 
 
@@ -433,12 +411,12 @@ def process_summarise(payload):
 def process_tags(payload):
     return run_service_task(
         payload=payload,
-        task_type="tags",
-        service_name="taggingservice",
+        job_type="tagging",
+        service_name="transcriptservice",
         log_tag="[Tagging Worker]",
         file_suffix="tagging_output",
         result_key="tagging_result",
-        api_url=tagging_api_url
+        api_url=transcript_api_url
     )
 
 
@@ -447,7 +425,9 @@ def speaker_extent(payload):
     file_path = os.path.normpath(payload["file_path"])
     job_id = payload["job_id"]
 
-    transcript = load_json_file(file_path)
+    transcript: dict | None = load_json_file(file_path)
+    if not transcript:
+        raise ValueError("Failed to load transcript")
 
     segments = transcript.get("segments", [])
     if not segments:
@@ -495,7 +475,7 @@ def segment_extent(payload):
     first = segments[0]
     last = segments[len(segments) - 1]
     start_ms = first.get("startMs", 0)
-    end_ms = last.get("endMs", 0)
+    end_ms = last.get("endMs", 0) 
 
     if start_ms > end_ms:
         start_ms = end_ms
@@ -546,11 +526,11 @@ def execute_workflow(self, workflow_path, job_id, path, prompts=None, job_type="
         callback_url=callback_url,
         job_inputs={"path": path, "prompts": prompts},
         on_failure=parser.settings.get("on_failure", "stop"),
-        # Node-level retry. The legacy chains get this from
-        # @app.task(autoretry_for=...), which does not engage on the DAG path
-        # because the python driver calls the task's function directly — and
-        # a Celery-level retry of execute_workflow would re-run the whole DAG
-        # rather than the one node that failed.
+        # Node-level retry. Celery's @app.task(autoretry_for=...) never engages
+        # on the DAG path because the python driver calls a task's function
+        # directly rather than dispatching it — and a Celery-level retry of
+        # execute_workflow would re-run the whole DAG rather than the one
+        # node that failed.
         retries=parser.settings.get("retries", 0),
         retry_backoff=parser.settings.get("retry_backoff", 1.0),
         retry_backoff_max=parser.settings.get("retry_backoff_max", 60.0),
@@ -568,9 +548,9 @@ def execute_workflow(self, workflow_path, job_id, path, prompts=None, job_type="
         engine.execute()
 
     # Per-node envelopes go to the workspace rather than into the task
-    # result, so /status returns the same shape for DAG jobs as it does for
-    # the legacy chains (finalize's merged output) without losing the
-    # node-level detail that makes a failed run diagnosable.
+    # result, so /status returns the one /status contract (the terminal
+    # node's merged output) without losing the node-level detail that makes
+    # a failed run diagnosable.
     try:
         save_to_disk(job_id, "dag_run.json", engine.run_summary())
     except Exception as e:

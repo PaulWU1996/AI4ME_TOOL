@@ -1,6 +1,6 @@
 {
   "workflow": {
-    "name": "full_pipeline",
+    "name": "audio_only",
     "version": "1.0"
   },
   "settings": {
@@ -11,36 +11,42 @@
     {
       "id": "download",
       "task": "download_file",
+      "call": "kwargs",
+      "inject": [
+        "path",
+        "prompts",
+        "job_id"
+      ],
+      "requires": [
+        "path"
+      ],
       "depends_on": [],
       "retries": 3
-    },
-    {
-      "id": "visual",
-      "task": "process_visual",
-      "service": "visualservice",
-      "depends_on": [
-        "download"
-      ]
     },
     {
       "id": "audio",
       "task": "process_audio",
       "service": "audioservice",
       "depends_on": [
-        "visual"
+        "download"
       ]
     },
     {
       "id": "final",
       "task": "finalize_results",
+      "call": "kwargs",
+      "inject": [
+        "job_id",
+        "job_type",
+        "callback_url"
+      ],
+      "terminal": true,
       "kwargs": {
         "expects": [
-          "audio",
-          "visual"
+          "audio"
         ]
       },
       "depends_on": [
-        "visual",
         "audio"
       ]
     }

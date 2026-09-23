@@ -10,16 +10,13 @@ audio_port = os.getenv("AUDIO_PORT", "9002")
 visual_host = os.getenv("VISUAL_HOST", "localhost")
 visual_port = os.getenv("VISUAL_PORT", "9001")
 visual_api_admin_key = os.getenv("ADMIN_KEY", "ai4me_admin_password")
-summarise_host = os.getenv("SUMMARISE_HOST", "localhost")
-summarise_port = os.getenv("SUMMARISE_PORT", "9003")
-tagging_host = os.getenv("TAGGING_HOST", "localhost")
-tagging_port = os.getenv("TAGGING_PORT", "9004")
+transcript_host = os.getenv("TRANSCRIPT_HOST", "localhost")
+transcript_port = os.getenv("TRANSCRIPT_PORT", "9003")
 
 
 audio_api_url = f"http://{audio_host}:{audio_port}/process_audio/"
 visual_api_url = f"http://{visual_host}:{visual_port}"
-summarise_api_url = f"http://{summarise_host}:{summarise_port}/process/"
-tagging_api_url = f"http://{tagging_host}:{tagging_port}/process/"
+transcript_api_url = f"http://{transcript_host}:{transcript_port}/process/"
 
 # Health-check URLs, keyed by config/services.json's service names — used
 # by dag/readiness.py's multi-host mode. Paths match docker-compose.yml's
@@ -27,8 +24,7 @@ tagging_api_url = f"http://{tagging_host}:{tagging_port}/process/"
 SERVICE_HEALTH_URLS = {
     "audioservice": f"http://{audio_host}:{audio_port}/health/",
     "visualservice": f"http://{visual_host}:{visual_port}/health/",
-    "transcriptservice": f"http://{summarise_host}:{summarise_port}/health",
-    "taggingservice": f"http://{tagging_host}:{tagging_port}/health",
+    "transcriptservice": f"http://{transcript_host}:{transcript_port}/health",
 }
 
 shared_path = os.getenv("SHARED_PATH", "/app/tmp")

@@ -1,0 +1,71 @@
+{
+  "workflow": {
+    "name": "summarise",
+    "version": "1.0"
+  },
+  "settings": {
+    "on_failure": "stop",
+    "retry_backoff": 1.0
+  },
+  "tasks": [
+    {
+      "id": "download",
+      "task": "download_file",
+      "call": "kwargs",
+      "inject": [
+        "path",
+        "prompts",
+        "job_id"
+      ],
+      "requires": [
+        "path"
+      ],
+      "depends_on": [],
+      "retries": 3
+    },
+    {
+      "id": "transcript",
+      "task": "transcript_to_text",
+      "depends_on": [
+        "download"
+      ]
+    },
+    {
+      "id": "summarise",
+      "task": "process_summarise",
+      "service": "transcriptservice",
+      "depends_on": [
+        "transcript"
+      ]
+    },
+    {
+      "id": "tagging",
+      "task": "process_tags",
+      "service": "transcriptservice",
+      "depends_on": [
+        "summarise"
+      ]
+    },
+    {
+      "id": "final",
+      "task": "finalize_results",
+      "call": "kwargs",
+      "inject": [
+        "job_id",
+        "job_type",
+        "callback_url"
+      ],
+      "terminal": true,
+      "kwargs": {
+        "expects": [
+          "summarise",
+          "tagging"
+        ]
+      },
+      "depends_on": [
+        "summarise",
+        "tagging"
+      ]
+    }
+  ]
+}
