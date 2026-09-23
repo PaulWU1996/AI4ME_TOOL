@@ -1,7 +1,7 @@
 {
-  "_comment": "X-API-Key below is a placeholder -- the http driver treats auth as static, externally-provisioned context (it has no key-generation/rotation logic of its own, unlike worker/utils.py:ensure_api_key). Regenerate with: curl -X POST http://<visualservice-host>:8000/api/keys/generate -H 'X-Admin-Key: <AI4ME_ADMIN_PASSWORD>' -H 'Content-Type: application/json' -d '{\"client_name\": \"full_pipeline_http\"}' -- then paste the returned api_key below.",
+  "_comment": "X-API-Key below is a placeholder -- the http driver treats auth as static, externally-provisioned context (it has no key-generation/rotation logic of its own, unlike worker/utils.py:ensure_api_key). Regenerate with: curl -X POST http://<visualservice-host>:8000/api/keys/generate -H 'X-Admin-Key: <AI4ME_ADMIN_PASSWORD>' -H 'Content-Type: application/json' -d '{\"client_name\": \"full_http\"}' -- then paste the returned api_key below.",
   "workflow": {
-    "name": "full_pipeline_http",
+    "name": "full_http",
     "version": "1.0"
   },
   "settings": {
@@ -12,6 +12,15 @@
     {
       "id": "download",
       "task": "download_file",
+      "call": "kwargs",
+      "inject": [
+        "path",
+        "prompts",
+        "job_id"
+      ],
+      "requires": [
+        "path"
+      ],
       "depends_on": [],
       "retries": 3
     },

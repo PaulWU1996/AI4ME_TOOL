@@ -13,13 +13,12 @@ from dag.parser import Parser
 
 app = FastAPI()
 
-SUPPORTED_JOB_TYPES = ["full", "audio_only", "visual_only", "summarise", "speaker-extent-summarise", "utterance-extent-summarise", "tagging"]
 MAX_ETA_SECONDS = 3600  # set to visibility_timeout value
 
-# Registered DAG workflows dispatch through tasks.execute_workflow instead of
-# the legacy build_chain() below. WORKFLOWS_PATH is a volume shared between
-# the controller and worker containers; registry.json maps a workflow's own
-# `workflow.name` to its file, and is updated by POST /workflows.
+# All jobs dispatch through registered DAG workflows (tasks.execute_workflow).
+# WORKFLOWS_PATH is a volume shared between the controller and worker
+# containers; registry.json maps a workflow's own `workflow.name` to its
+# file, and is updated by POST /workflows.
 WORKFLOWS_PATH = os.getenv("WORKFLOWS_PATH", "/app/workflows")
 REGISTRY_PATH = os.path.join(WORKFLOWS_PATH, "registry.json")
 
@@ -46,73 +45,6 @@ class ProcessRequest(BaseModel):
     run_at_ms: Optional[int] = None
 
 
-def build_chain(request: ProcessRequest, job_id: str):
-    download = signature(
-        "tasks.download_file",
-        args=[request.path, job_id],
-        kwargs={"prompts": request.prompts},
-        immutable=True,
-    )
-    summarise = signature("tasks.process_summarise")
-    tagging = signature("tasks.process_tags")
-    transcript_to_text = signature("tasks.transcript_to_text")
-    finalize = signature(
-        "tasks.finalize_results",
-        args=[job_id],
-        kwargs={"job_type": request.job_type, "callback_url": request.callback_url},
-        immutable=True,
-    ).set(task_id=job_id)
-
-    chains = {
-        "full": (
-            download
-            | signature("tasks.process_visual")
-            | signature("tasks.process_audio")
-            | finalize
-        ),
-        "audio_only": (
-            download 
-            | signature("tasks.process_audio") 
-            | finalize
-        ),
-        "visual_only": (
-            download 
-            | signature("tasks.process_visual") 
-            | finalize
-        ),
-        "summarise": (
-            download 
-            | transcript_to_text
-            | summarise 
-            | tagging
-            | finalize
-        ),
-        "speaker-extent-summarise": (
-            download 
-            | signature("tasks.speaker_extent") 
-            | transcript_to_text 
-            | summarise 
-            | tagging
-            | finalize
-        ),
-        "utterance-extent-summarise": (
-            download 
-            | signature("tasks.segment_extent") 
-            | transcript_to_text 
-            | summarise 
-            | tagging
-            | finalize
-        ),
-        "tagging": (
-            download 
-            | transcript_to_text 
-            | tagging 
-            | finalize
-        ),
-    }
-    return chains.get(request.job_type)
-
-
 def build_dag_workflow(request: ProcessRequest, job_id: str, workflow_path: str):
     return signature(
         "tasks.execute_workflow",
@@ -136,12 +68,7 @@ async def register_workflow(workflow: dict = Body(...)):
 
     A name may hold multiple registered versions; `latest` tracks whichever
     was registered most recently and is what /process uses when a request
-    doesn't pin a specific version. This applies to built-in job_type names
-    too (e.g. "full") — build_chain()'s hardcoded chains are being phased
-    out, so registering a DAG version under a built-in name is intentional:
-    it becomes the default for that name once it's `latest`, and the legacy
-    chain remains reachable only for requests with no matching registry
-    entry at all.
+    doesn't pin a specific version.
     """
     meta = workflow.get("workflow") or {}
     name = meta.get("name")
@@ -203,10 +130,11 @@ async def start_pipeline(request: ProcessRequest):
             detail=f"job_type '{request.job_type}' has no registered versions to pin.",
         )
 
-    if request.job_type not in SUPPORTED_JOB_TYPES and workflow_entry is None:
+    if workflow_entry is None:
         raise HTTPException(
             status_code=400,
-            detail=f"Unsupported job_type '{request.job_type}'. Choose from: {SUPPORTED_JOB_TYPES + list(registry.keys())}",
+            detail=f"Unsupported job_type '{request.job_type}'. "
+            f"Register a workflow first via POST /workflows. Available: {list(registry.keys())}.",
         )
 
     job_id = uuid()
@@ -229,10 +157,7 @@ async def start_pipeline(request: ProcessRequest):
             async_kwargs["eta"] = eta_dt
 
     try:
-        if workflow_entry is not None:
-            build_dag_workflow(request, job_id, workflow_entry["path"]).apply_async(**async_kwargs)
-        else:
-            build_chain(request, job_id).apply_async(**async_kwargs)
+        build_dag_workflow(request, job_id, workflow_entry["path"]).apply_async(**async_kwargs)
         return {"status": "submitted", "job_id": job_id, "job_type": request.job_type}
 
     except Exception as e:
