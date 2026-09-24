@@ -1,6 +1,8 @@
 import json
 import os
 
+# Alot of this should be defined either internaly to the workers container or in the workflow definition.
+
 redis_host = os.getenv("REDIS_HOST", "127.0.0.1")
 redis_port = os.getenv("REDIS_PORT", "6379")
 
@@ -17,15 +19,6 @@ transcript_port = os.getenv("TRANSCRIPT_PORT", "9003")
 audio_api_url = f"http://{audio_host}:{audio_port}/process_audio/"
 visual_api_url = f"http://{visual_host}:{visual_port}"
 transcript_api_url = f"http://{transcript_host}:{transcript_port}/process/"
-
-# Health-check URLs, keyed by config/services.json's service names — used
-# by dag/readiness.py's multi-host mode. Paths match docker-compose.yml's
-# own healthcheck blocks for each service.
-SERVICE_HEALTH_URLS = {
-    "audioservice": f"http://{audio_host}:{audio_port}/health/",
-    "visualservice": f"http://{visual_host}:{visual_port}/health/",
-    "transcriptservice": f"http://{transcript_host}:{transcript_port}/health",
-}
 
 shared_path = os.getenv("SHARED_PATH", "/app/tmp")
 api_key_path = os.getenv("API_KEY_PATH", "/app/data")

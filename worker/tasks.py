@@ -24,16 +24,15 @@ from utils import (
     get_speaker_turn_boundary_ms,
     load_json_file,
     save_to_disk,
+    start_service,
+    stop_service,
 )
 
-# Service lifecycle goes through the lease in dag/readiness.py rather than
-# calling utils.start_service/stop_service directly. The lease is
-# reference-counted and re-entrant, so when a task runs as a DAG node whose
-# workflow also declares `service`, the engine's bracket and this one nest
-# into a single start/stop instead of cycling the container twice.
-from dag.engine import DAGEngine
-from dag.parser import Parser
-from dag.readiness import ensure_ready, release
+# Service lifecycle is a per-worker concern: the worker owns this node's
+# on-demand service containers, starting them on demand (keepalive-aware)
+# and stopping them when a task is done. Concurrency is serialized by the
+# queue: one worker per node's instances, concurrency=1 -- so a task's
+# start/work/stop bracket can never race another task's.
 
 # --- Celery ---
 app = Celery(
@@ -60,7 +59,8 @@ def report_progress(job_id, stage, message):
 
 
 # --- Download Task ---
-@app.task(name="tasks.download_file", bind=True)
+@app.task(name="tasks.download_file", bind=True, autoretry_for=(Exception,),
+          max_retries=3, retry_backoff=1.0, retry_backoff_max=60.0)
 def download_file(self, path, job_id, prompts=None):
     output_dir = os.path.join(shared_path, job_id)
     os.makedirs(output_dir, exist_ok=True)
@@ -110,15 +110,55 @@ def download_file(self, path, job_id, prompts=None):
         raise
 
 
+@app.task(name="tasks.http_call")
+def http_call(payload, url, method="POST", headers=None, timeout=60, file_field=None,
+              file_path_key="file_path", service=None):
+    """Generic service call backing `driver: "http"` workflow nodes.
+
+    The predecessor result arrives positionally as `payload`. With
+    `file_field` set, the file at `payload[file_path_key]` is uploaded as
+    multipart/form-data; otherwise the payload is sent verbatim as a JSON
+    body. `service`, when set, starts this node's on-demand service for the
+    duration of the call and stops it (unless keepalive) afterwards.
+    """
+    if service:
+        start_service(service)
+
+    try:
+        if file_field:
+            local_path = payload.get(file_path_key)
+            if not local_path:
+                raise ValueError(
+                    f"http_call: no '{file_path_key}' in payload to upload as '{file_field}'."
+                )
+            with open(local_path, "rb") as f:
+                response = requests.request(
+                    method, url,
+                    files={file_field: (os.path.basename(local_path), f)},
+                    headers=headers or {}, timeout=timeout,
+                )
+        else:
+            response = requests.request(
+                method, url, json=payload, headers=headers or {}, timeout=timeout,
+            )
+        response.raise_for_status()
+    finally:
+        if service:
+            stop_service(service)
+    try:
+        return response.json()
+    except ValueError:
+        return response.text
+
+
 @app.task(name="tasks.process_visual")
 def process_visual(payload):
-    # file_path: /app/tmp/{task_id}/{filename}
     file_path = os.path.normpath(payload["file_path"])
     job_id = payload["job_id"]
     file_name = os.path.basename(file_path)
     visual_result = None
 
-    ensure_ready("visualservice")
+    start_service("visualservice")
     try:
         api_key = ensure_api_key()
         if not api_key:
@@ -160,7 +200,7 @@ def process_visual(payload):
         save_to_disk(job_id, f"{file_name_no_ext}_visual_output.json", visual_result)
         print(f"[Visual Worker] Success: {len(visual_result)} segments.")
     finally:
-        release("visualservice")
+        stop_service("visualservice")
 
     # pass visual chunks forward so process_audio can use them for chunk splitting
     return {**payload, "visual_result": visual_result}
@@ -179,7 +219,7 @@ def process_audio(payload):  # change filepath to dict inputs
     job_id = payload["job_id"]
     file_name = os.path.basename(file_path)
 
-    ensure_ready("audioservice")
+    start_service("audioservice")
     try:
         print(f"[Audio Worker] Starting Task: {file_path}")
 
@@ -217,7 +257,7 @@ def process_audio(payload):  # change filepath to dict inputs
         file_name_no_ext = os.path.splitext(file_name)[0]
         save_to_disk(job_id, f"{file_name_no_ext}_audio_output.json", outputs)
     finally:
-        release("audioservice")
+        stop_service("audioservice")
 
     return {
         **payload,
@@ -227,10 +267,6 @@ def process_audio(payload):  # change filepath to dict inputs
         "output": outputs,
         "error": None,
     }
-
-
-
-
 
 @app.task(name="tasks.finalize_results")
 def finalize_results(job_id, job_type="full", callback_url=None, expects=None):
@@ -390,7 +426,7 @@ def run_service_task(
     }
 
     try:
-        ensure_ready(service_name)
+        start_service(service_name)
         print(f"{log_tag} Starting Task: {job_id}")
 
         response = requests.post(
@@ -416,7 +452,7 @@ def run_service_task(
         print(f"{log_tag} Error: {str(e)}")
         result_template["error"] = str(e)
     finally:
-        release(service_name)
+        stop_service(service_name)
 
     return {**payload, result_key: result_template}
 
@@ -579,50 +615,3 @@ def process_gemma(payload):
                 "error": str(e),
             },
         }
-        
-@app.task(name="tasks.execute_workflow", bind=True)
-def execute_workflow(self, workflow_path, job_id, path, prompts=None, job_type="full", callback_url=None):
-    """Entry point for DAG-based jobs: parses a workflow JSON template into
-    a DAG and runs it as a single Celery job, feeding this request's
-    `path`/`prompts` into the DAG as runtime input (job_inputs) rather than
-    baking them into the template.
-    """
-    parser = Parser(workflow_path)
-    engine = DAGEngine(
-        parser.dag,
-        job_id=job_id,
-        job_type=job_type,
-        callback_url=callback_url,
-        job_inputs={"path": path, "prompts": prompts},
-        on_failure=parser.settings.get("on_failure", "stop"),
-        # Node-level retry. Celery's @app.task(autoretry_for=...) never engages
-        # on the DAG path because the python driver calls a task's function
-        # directly rather than dispatching it — and a Celery-level retry of
-        # execute_workflow would re-run the whole DAG rather than the one
-        # node that failed.
-        retries=parser.settings.get("retries", 0),
-        retry_backoff=parser.settings.get("retry_backoff", 1.0),
-        retry_backoff_max=parser.settings.get("retry_backoff_max", 60.0),
-    )
-    # Sequential by default. execute_parallel() is safe as far as service
-    # occupancy goes -- dag/readiness.py leases refcount holders and cap
-    # concurrency per service -- but running two *different* GPU services
-    # concurrently also needs their combined VRAM to actually fit the host,
-    # which a lease alone doesn't check. A workflow opts in per-template via
-    # `settings.parallel: true` once its nodes' GPU footprints are known to
-    # coexist (e.g. pinned to separate devices).
-    if parser.settings.get("parallel", False):
-        engine.execute_parallel()
-    else:
-        engine.execute()
-
-    # Per-node envelopes go to the workspace rather than into the task
-    # result, so /status returns the one /status contract (the terminal
-    # node's merged output) without losing the node-level detail that makes
-    # a failed run diagnosable.
-    try:
-        save_to_disk(job_id, "dag_run.json", engine.run_summary())
-    except Exception as e:
-        print(f"[DAG] Could not write dag_run.json: {e}")
-
-    return engine.terminal_result()

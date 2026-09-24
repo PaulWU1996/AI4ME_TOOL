@@ -167,7 +167,7 @@ Returns a `job_id` immediately. If `callback_url` is provided, results are also 
 
 Once the request is received, the Controller will:
 1. Look up the registered workflow for `job_type` (optionally pinned by `version`) and generate a unique `job_id`
-2. Enqueue a single `execute_workflow` Celery task that runs the DAG
+2. Translate the workflow into a single Celery `chain` of layer groups (`dag/compose.py`) and enqueue it
 3. Return `{"status": "submitted", "job_id": "...", "job_type": "..."}` immediately
 
 Note: The outputs (audio and visual analysis results, as well the task info) will be saved in the shared volume workspace under `/app/tmp/{job_id}/` before being returned to the client or sent to the callback URL. You can also check the outputs on the host machine by navigating to the corresponding directory in the shared volume (e.g., `/your/path/to/shared_vol/{job_id}/`) while the processing is still running or after it has completed. This can be useful for debugging or verifying intermediate results.
@@ -189,7 +189,7 @@ Returns combined JSON results once `is_ready` is `true`.
 
 ## 5. TASK ORCHESTRATION DETAILS
 
-Jobs dispatch through **registered DAG workflows**. `POST /workflows` validates and permanently registers a workflow template (name + version from its body); a subsequent `POST /process` with `job_type=<name>` runs the workflow's `latest` version (or the one pinned by `version`) as a single `execute_workflow` Celery task.
+Jobs dispatch through **registered DAG workflows**. `POST /workflows` validates and permanently registers a workflow template (name + version from its body); a subsequent `POST /process` with `job_type=<name>` runs the workflow's `latest` version (or the one pinned by `version`) by translating it into a single Celery canvas — a `chain` of topological layers, sibling nodes as a parallel `group` (`dag/compose.py`, running in the controller).
 
 ```bash
 # Register a workflow template, then run it
@@ -222,7 +222,7 @@ A workflow template declares its nodes with `id`, `task` (a function in `worker/
 | `inject: [...]` | For `call: "kwargs"` nodes — which job-context keys (`path`, `prompts`, `job_id`, `job_type`, `callback_url`, ...) to pass in; job context wins over template `kwargs` defaults. |
 | `requires: [...]` | For `call: "kwargs"` nodes — keys that must resolve at pre-flight, or the job fails fast. |
 | `terminal: true` | The node whose output is the job's `/status` result (a workflow's summary/finalize step). |
-| `service` / `retries` | GPU service to acquire for the node; engine-level retry count. |
+| `service` / `retries` | On-demand service this node's worker starts/stops around the node (per-worker lifecycle manager in `worker/utils.py`); node-level retry count (honored on `download_file` by its task-level `autoretry_for`). |
 
 For example, `workflows/full_1.0.json`:
 
@@ -253,10 +253,10 @@ The full workflow is demonstrated in the following diagram:
                             ▼
 ┌─────────────────────────────────────────────────────────────────────┐
 │                     CONTROLLER  :9000                               │
-│  FastAPI — looks up registered workflow, generates job_id, enqueues │
-│  a single execute_workflow task via .apply_async()                  │
+│  FastAPI — looks up registered workflow, generates job_id, builds   │
+│  the Celery canvas (dag/compose.py), enqueues via .apply_async()    │
 └───────────────────────────┬─────────────────────────────────────────┘
-                            │ enqueue execute_workflow
+                            │ enqueue chain(*layers)
                             ▼
 ┌─────────────────────────────────────────────────────────────────────┐
 │                     REDIS  :6379                                    │
@@ -269,35 +269,31 @@ The full workflow is demonstrated in the following diagram:
 ┌─────────────────────────────────────────────────────────────────────┐
 │                      WORKER  (Celery)                               │
 │                                                                     │
-│  Per-job DAG (settings.parallel: false → sequential, else           │
-│  topological generations run concurrently):                         │
+│  One chain(*steps), one step per topological layer. Sibling nodes   │
+│  in a layer form a group and run in parallel (full_http's two http  │
+│  nodes today); a group followed by a later layer is auto-upgraded   │
+│  to a chord (fan-in). The default full workflow is a pure chain:    │
+│  download → visual → audio → final.                                 │
 │                                                                     │
-│  ① download_file                                                    │
+│  ① download_file   (immutable kwargs)                              │
 │     S3 / HTTP(S) / local → /app/tmp/{job_id}/{filename}            │
-│     returns: {file_path, job_id, prompts}                           │
 │            │                                                        │
 │            ▼                                                        │
-│  ② process_visual  (if the workflow has a visual node)             │
-│     acquires visualservice → POST /analyze (upload video)          │
-│     parses XML → flat caption segments                              │
+│  ② process_visual  (starts visualservice → /analyze)                │
 │     saves {name}_visual_output.json                                 │
 │            │                                                        │
 │            ▼                                                        │
-│  ③ process_audio  (if the workflow has an audio node)              │
-│     acquires audioservice → POST /process_audio/                   │
-│     passes visual_result as chunk boundaries                        │
+│  ③ process_audio  (starts audioservice → /process_audio/)           │
 │     saves {name}_audio_output.json                                  │
 │            │                                                        │
 │            ▼                                                        │
-│  ④ finalize_results  (the terminal node)                           │
+│  ④ finalize_results  (immutable, terminal node)                    │
 │     merges audio + visual JSON from shared volume                   │
 │     evaluates success per kwargs.expects                            │
 │     writes task_info.txt                                            │
 │     deletes raw video on success                                    │
 │     POST callback_url (if provided)                                 │
 │     stores final_output in Redis under job_id                       │
-│                                                                     │
-│  Per-node envelopes are written to {job_id}/dag_run.json            │
 └───────────────────────────┬─────────────────────────────────────────┘
                             │
               ┌─────────────┴──────────────┐
@@ -314,7 +310,6 @@ The full workflow is demonstrated in the following diagram:
 │    ├── video.mp4                  (deleted on success)              │
 │    ├── video_visual_output.json                                     │
 │    ├── video_audio_output.json                                      │
-│    ├── dag_run.json              (per-node envelopes + order)       │
 │    └── task_info.txt                                                │
 └─────────────────────────────────────────────────────────────────────┘
 ```

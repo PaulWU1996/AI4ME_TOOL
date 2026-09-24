@@ -76,15 +76,15 @@ mkdir -p ./weights/models
 POST /process (controller)   # JSON body: {path, job_type, prompts, callback_url, version}
   ↓
 job_type must be a registered workflow (workflows/registry.json, added via POST /workflows)
-  └─ yes -> tasks.execute_workflow  (DAG engine, dag/engine.py)
+  └─ yes -> build_workflow_canvas() (dag/compose.py) -> .apply_async()
   ↓
-Engine dispatches nodes in topological order (sequential by default, or parallel
-per settings.parallel):
-  ├─ download_file: S3 / HTTP(S) / local → /app/tmp/{job_id}/
+A single Celery chain(*steps), one step per topological layer — sibling
+nodes in a layer become a group (so they run in parallel); a group followed
+by a later layer is auto-upgraded to a chord (fan-in):
+  ├─ download_file: S3 / HTTP(S) / local → /app/tmp/{job_id}/   (immutable)
   ├─ process_visual: starts visualservice container → /analyze (XML→JSON)
-  └─ process_audio: starts audioservice container → /process_audio/
-  ↓
-finalize_results: merge outputs, write task_info.txt, cleanup video
+  ├─ process_audio: starts audioservice container → /process_audio/
+  └─ finalize_results (chord callback, immutable): merge outputs, write task_info.txt, cleanup video
   ↓
 GET /status/{job_id} returns results (or callback_url receives them)
 ```
@@ -92,12 +92,13 @@ GET /status/{job_id} returns results (or callback_url receives them)
 ### Key Design Decisions
 
 - **`download_file` lives in the worker** (not controller) so the downloaded file lands on the shared volume accessible to the analysis tasks.
-- **Audio and visual run sequentially today.** The `<em>node</em>` chain is a sequential one by default — nothing in the current default workflows runs them concurrently. `DAGEngine.execute_parallel()` exists and is safe with respect to service occupancy (see leases below), but is not enabled by default: it still needs an aggregate VRAM feasibility check, since a per-service lease does not stop two *different* GPU services being jointly resident beyond host capacity.
-- **Service leases (`dag/readiness.py`):** `ensure_ready`/`release` are reference-counted, re-entrant per thread, and capped by a per-service `concurrency` (default 1, overridable with the `SERVICE_CONCURRENCY` env var as JSON). The container starts on the first holder and stops on the last, so the engine's bracket around a node declaring `service` and the task body's own bracket nest into a single start/stop rather than cycling the container twice. A queued waiter inherits a running service instead of it being stopped and cold-started again. These are in-process locks: they cover threads in one worker process, not multiple workers or hosts.
-- **Node inputs are declared, not inferred.** The engine never keys off a task's name to decide how to call it. Every node defaults to the merged-predecessor-payload convention; a node opts out with `call: "kwargs"` and reads a slice of the job context (`path`, `prompts`, `job_id`, `job_type`, `callback_url`) named in its `inject` list, with `requires` failing the node fast if any such key is missing. The workflow's summary node is flagged `terminal: true` — that node's output is the `/status` result.
+- **Parallelism is expressed by the DAG structure.** The composer puts sibling nodes of a layer in a `group` — Celery runs them concurrently and auto-upgrades the group to a chord where a later layer fans in. Today only `full_http`'s two http nodes are siblings and run in parallel; the default `full` is a pure chain (its `audio` node depends on `visual`). The aggregate VRAM feasibility caveat that blocked parallel execution under the old engine now applies whenever a layer holds two GPU-backed nodes; nothing enforces host VRAM, so keep GPU nodes in separate layers or on one service unless capacity is known.
+- **Scale is per-node, and the queue is the entire serialization story.** There are no locks anywhere. The deployment unit is one worker owning its node's on-demand service containers (`worker/utils.py` `start_service`/`stop_service`). A worker runs one task at a time (`concurrency=1`), and no other worker touches its containers, so a task's start/work/stop bracket can never race another task's. Add capacity by replicating the node — every node runs identical worker code, single host and multi host alike. The one rule that makes this hold: one worker per node's instances; do not point multiple workers at a shared instance (that would need coordination at the service boundary — deliberately out of scope).
+- **Service lifecycle is a per-worker concern.** Each task brackets its own service work with `start_service(service)` before and `stop_service(service)` in a `finally` (no-op for keepalive services). `start_service` is probe-first — an already-healthy container (keepalive resident, or still warm from the previous task in a sequential chain) is reused as-is; otherwise it cold-starts via `docker compose up -d` and polls Docker health, and `stop_service` tears it down. There is no lease, no `SERVICE_CONCURRENCY`, no `DEPLOYMENT_MODE`: starting a container and arbitrating between workers were two different concerns, and only the first is needed.
+- **Node inputs are declared, not inferred.** The composer never keys off a task's name to decide how to call it. A `call: "kwargs"` node (`download_file`, `finalize_results`) becomes an *immutable* signature carrying a slice of the job context (`path`, `prompts`, `job_id`, `job_type`, `callback_url`) named in its `inject` list (plus static `kwargs`); immutable so a predecessor's payload is never passed positionally. Every other node becomes a positional signature — the old merged-predecessor-payload convention becomes Celery's own argument passing: a node after a single predecessor receives that result; a node after a group receives the aggregated result list. The workflow's summary node is flagged `terminal: true` — that node's output is the `/status` result.
 - **`finalize_results` success criteria are declarative and required.** A workflow's finalize node must declare `kwargs.expects` (e.g. `["audio", "visual"]`) — without it there's no way to know what "done" means, and the job fails at the final node even though every other node succeeded.
-- **Retries are per node, in the engine, not per Celery task.** `tasks.execute_workflow` is a *single* Celery task covering the whole DAG, so a Celery-level retry would re-run every node — including the expensive GPU ones — to recover from one transient download. Celery's `@app.task(autoretry_for=...)` also never engages on the DAG path at all, because the python driver calls a task's function directly rather than dispatching it. A workflow sets `settings.retries` as a default and overrides it per node with a `retries` attribute; `settings.retry_backoff`/`retry_backoff_max` control the doubling delay. A retry re-attempts the whole bracket including service acquisition, so a node whose service failed to start gets a fresh cold start — and its side effects run again, so only declare retries on nodes that tolerate that.
-- **One `/status` contract.** A workflow's `terminal: true` node's merged output is what `/status` returns (via `finalize_results`, matching the shape the legacy chains returned). Jobs additionally write per-node envelopes to `{job_id}/dag_run.json` in the workspace, so node-level detail is available for debugging without changing the wire shape.
+- **Retries are per node, in the worker, not per Celery task.** The whole workflow runs as one flat Celery chain, so a Celery-level retry of the canvas would re-run every node — including the expensive GPU ones — to recover from one transient download. Instead only `download_file` (the lone node declaring `retries` in the workflows) carries `autoretry_for=(Exception,)` / backoff on its task decorator, so a retry re-runs just that node, never its already-finished successors. The values are hardcoded on the task (`max_retries=3`, `retry_backoff=1.0`, `retry_backoff_max=60.0`) to match the workflow's declared `retries`/`retry_backoff`; the composer does not read retry settings.
+- **One `/status` contract.** A workflow's `terminal: true` node's output is what `/status` returns (via `finalize_results`, matching the shape the legacy chains returned). The per-node envelope logging the old engine wrote to `{job_id}/dag_run.json` is gone with the engine — node-level debug detail now lives in the worker logs.
 - **The visual API key self-heals.** `ensure_api_key()` caches the key in `API_KEY_PATH/api.key`, but `process_visual` regenerates it and retries once on a 401/403. Without that, a service that had forgotten or rotated its keys — its store is `shared/api-data`, which any volume reset wipes — would reject the cached key on every future job forever.
 - **`PYTHONPATH=/app` is required in both images.** Celery's app loader puts the working directory on `sys.path` only while importing the app module, then removes it — so any import that happens later (inside a task body) fails without it.
 - **On-demand containers:** the worker dynamically starts/stops on-demand services (`audioservice`, `visualservice`, `transcriptservice`) via the Docker Python SDK using the host Docker socket (`/var/run/docker.sock`). Health checks poll for 330s before timing out.
@@ -124,9 +125,6 @@ GET /status/{job_id} returns results (or callback_url receives them)
 - `API_KEY_PATH` — path where the visual API key is cached
 - `COMPOSE_PROJECT_DIR`, `COMPOSE_FILE` — docker-compose context for `_compose()` helper
 - `SERVICE_MODES_PATH` — path to the resolved cold-start/keepalive selection written by `scripts/start.sh` (default `/app/tmp/service_modes.json`)
-- `DEPLOYMENT_MODE` — `single_host` (default; starts containers over the Docker socket) or `multi_host` (checks reachability only)
-- `SERVICE_CONCURRENCY` — JSON object of per-service lease limits, e.g. `{"transcriptservice": 2}` (default 1 each)
-- `LEASE_TIMEOUT` — seconds a node waits for a busy service before failing (default 3600, matching the Celery visibility timeout)
 - `HEALTH_CHECK_TIMEOUT` / `HEALTH_CHECK_INTERVAL` — container health poll budget and cadence (defaults 330s / 60s)
 - `VISUAL_REQUEST_TIMEOUT` / `AUDIO_REQUEST_TIMEOUT` / `SCRIPT_REQUEST_TIMEOUT` — how long to wait on a service's HTTP response before giving up (defaults 6000s / 1800s / 1800s). A service that accepts the connection and then never answers blocks the worker for this long
 
@@ -145,29 +143,29 @@ Services not passed to `--keepalive` default to `coldstart` (today's behavior �
 
 - `controller/main.py` — FastAPI app, `/process` and `/status/{job_id}` endpoints
 - `controller/tasks.py` — Celery task *signatures* (producer side, no logic)
-- `worker/tasks.py` — All processing logic: `download_file`, `process_visual`, `process_audio`, `finalize_results`, plus service management helpers
+- `dag/compose.py` — translates a registered workflow into a Celery `chain` of layer groups (runs in the controller)
+- `dag/parser.py` — validates a workflow JSON and exposes its DAG
+- `worker/tasks.py` — All processing logic: `download_file`, `process_visual`, `process_audio`, `finalize_results`, `http_call`, plus service management helpers
 - `docker-compose.yml` — Single source of truth for service wiring, volumes, and networking
 
 ## Testing
 
-Two suites, neither needing a GPU:
+No test suite is checked in (the old unit/e2e suites were stripped for a
+clean production branch). Verification is done ad-hoc with a throwaway venv
+outside the repo:
 
-```bash
-python3 -m venv venv && ./venv/bin/pip install -r tests/requirements-dev.txt
-
-./venv/bin/python -m pytest                      # 140 unit tests, ~3s, no Docker at all
-./venv/bin/python tests/e2e/run_e2e.py           # 13 scenarios, ~2.5 min, real stack + mock services
-```
-
-`tests/` unit-tests `dag/` with stub modules installed in `sys.modules` under
-the names the worker image exposes them as. `tests/e2e/` runs the real
-controller, worker, Redis, Celery and Docker-socket orchestration against
-`mocks/service.py`, a stdlib stand-in for the four GPU services. See
-`tests/README.md` and `tests/e2e/README.md`.
+- **Build smoke tests** — import `dag.compose`, build the canvas for every
+  workflow JSON in `workflows/registry.json`, assert each canvas is a chain
+  of the expected layer groups; import `controller.main` and `worker.tasks`
+  and confirm task registration and resolver wiring.
+- **Live fan-in test** — with the installed online Python, run a
+  Celery worker against a throwaway Redis and dispatch a
+  `chain(group(...), finalize)` canvas generated by the same layering code
+  to prove group-parallelism, chord fan-in, and payload propagation.
 
 The mocks encode what `worker/tasks.py` *believes* the service contracts are.
-Verifying those against the real services is the one thing neither suite can
-do — see `docs/GPU_TEST_RUNBOOK.md` for the session that does, plus
+Verifying those against the real services is the one thing local smoke tests
+can't do — see `docs/GPU_TEST_RUNBOOK.md` for the session that does, plus
 `scripts/gpu_preflight.sh` (read-only environment check) and
 `scripts/capture_contracts.py` (captures the real services' responses and
 checks every assumption `worker/tasks.py` makes against them).
