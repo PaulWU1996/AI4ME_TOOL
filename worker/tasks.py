@@ -18,6 +18,7 @@ from consts import (
     visual_api_url,
 )
 from utils import (
+    _compose,
     ensure_api_key,
     extract_flat_captions,
     get_speaker_turn_boundary_ms,
@@ -49,6 +50,13 @@ app.conf.update(
     result_persistent=True,
     task_reject_on_worker_lost=True,
 )
+
+def report_progress(job_id, stage, message):
+    app.backend.store_result(
+        job_id,
+        {"job_id": job_id, "stage": stage, "message": message},
+        state="PROGRESS",
+    )
 
 
 # --- Download Task ---
@@ -241,18 +249,28 @@ def finalize_results(job_id, job_type="full", callback_url=None, expects=None):
     """
 
     workspace = os.path.join(shared_path, job_id)
-
+    gemma_labels = ("visual", "audio", "transcript")
     audio_files = glob.glob(os.path.join(workspace, "*_audio_output.json"))
     visual_files = glob.glob(os.path.join(workspace, "*_visual_output.json"))
     summarise_files = glob.glob(os.path.join(workspace, "*_summarise_output.json"))
     extent_files = glob.glob(os.path.join(workspace, "*_extent_output.json"))
     tagging_files = glob.glob(os.path.join(workspace, "*_tagging_output.json"))
+    gemma_files = {
+        label: glob.glob(os.path.join(workspace, f"*_gemma_{label}_output.json"))
+        for label in gemma_labels
+    }
 
     audio_data = load_json_file(audio_files[0]) if audio_files else None
     visual_data = load_json_file(visual_files[0]) if visual_files else None
     summarise_data = load_json_file(summarise_files[0]) if summarise_files else None
     extent_data = load_json_file(extent_files[0]) if extent_files else None
     tagging_data = load_json_file(tagging_files[0]) if tagging_files else None
+
+    gemma_data = {
+        label: load_json_file(files[0])
+        for label, files in gemma_files.items()
+        if files
+    }
 
     if audio_files:
         file_name = os.path.basename(audio_files[0]).replace("_audio_output.json", "")
@@ -264,6 +282,12 @@ def finalize_results(job_id, job_type="full", callback_url=None, expects=None):
         file_name = os.path.basename(extent_files[0]).replace("_extent_output.json", "")
     elif tagging_files:
         file_name = os.path.basename(tagging_files[0]).replace("_tagging_output.json", "")
+    elif gemma_files["visual"]:
+        file_name = os.path.basename(gemma_files["visual"][0]).replace("_gemma_visual_output.json", "")
+    elif gemma_files["audio"]:
+        file_name = os.path.basename(gemma_files["audio"][0]).replace("_gemma_audio_output.json", "")
+    elif gemma_files["transcript"]:
+        file_name = os.path.basename(gemma_files["transcript"][0]).replace("_gemma_transcript_output.json", "")
     else:
         file_name = None
 
@@ -273,6 +297,7 @@ def finalize_results(job_id, job_type="full", callback_url=None, expects=None):
         "summarise": summarise_data,
         "extent": extent_data,
         "tagging": tagging_data,
+        "gemma": gemma_data if len(gemma_data) == len(gemma_labels) else None,
     }
 
     if expects is None:
@@ -300,6 +325,7 @@ def finalize_results(job_id, job_type="full", callback_url=None, expects=None):
         f.write(f"Summarise Files: {summarise_files}\n")
         f.write(f"Extent Files: {extent_files}\n")
         f.write(f"Tagging Files: {tagging_files}\n")
+        f.write(f"Gemma Files: {gemma_files}\n")
         f.write(f"Expects: {expects}\n")
         f.write(f"Missing: {missing}\n")
         f.write(f"Status: {'Success' if job_success else 'Partial/Failed'}\n")
@@ -322,6 +348,7 @@ def finalize_results(job_id, job_type="full", callback_url=None, expects=None):
         "summarise_result": summarise_data,
         "extent_result": extent_data,
         "tagging_result": tagging_data,
+        "gemma_result": gemma_data,
         "status": "success" if job_success else "failed",
     }
 
@@ -425,14 +452,8 @@ def speaker_extent(payload):
     file_path = os.path.normpath(payload["file_path"])
     job_id = payload["job_id"]
 
-    transcript: dict | None = load_json_file(file_path)
-    if not transcript:
-        raise ValueError("Failed to load transcript")
-
-    segments = transcript.get("segments", [])
-    if not segments:
-        raise ValueError("No segments found in transcript")
-
+    transcript, segments = get_transcript(file_path)
+    
     start_speaker_ms = get_speaker_turn_boundary_ms(segments, 0, "forward")
     end_speaker_ms = get_speaker_turn_boundary_ms(segments, len(segments) - 1, "backward")
 
@@ -469,9 +490,8 @@ def segment_extent(payload):
     file_path = os.path.normpath(payload["file_path"])
     job_id = payload["job_id"]
 
-    transcript = load_json_file(file_path)
-
-    segments = transcript.get("segments", [])
+    _, segments = get_transcript(file_path)
+    
     first = segments[0]
     last = segments[len(segments) - 1]
     start_ms = first.get("startMs", 0)
@@ -489,15 +509,24 @@ def segment_extent(payload):
     print(f"[Segment Extent] Extracted range: {start_ms}ms - {end_ms}ms")
     return {**payload, "start": start_ms, "end": end_ms}
 
+def get_transcript(file_path):
+    transcript = load_json_file(file_path)
+    if not transcript:
+        raise ValueError("Failed to load transcript")
+
+    segments = transcript.get("segments", [])
+    if not segments:
+        raise ValueError("No segments found in transcript")
+
+    return transcript, segments
 
 @app.task(name="tasks.transcript_to_text")
 def transcript_to_text(payload):
     file_path = os.path.normpath(payload["file_path"])
     job_id = payload["job_id"]
 
-    transcript = load_json_file(file_path)
-    segments = transcript.get("segments", [])
-
+    _, segments = get_transcript(file_path)
+    
     text = " ".join(
         seg.get("text", "").strip() 
         for seg in segments 
@@ -510,7 +539,48 @@ def transcript_to_text(payload):
     print(f"[Transcript to Text] Saved text to {txt_path}")
     return {**payload, "file_path": txt_path}
 
+@app.task(name="tasks.process_gemma")
+def process_gemma(payload):
+    """Run Gemma analysis against the downloaded job video."""
+    file_path = os.path.normpath(payload.get("gemma_file_path") or payload["file_path"])
+    job_id = payload["job_id"]
+    file_name = os.path.basename(payload["file_path"])
+    file_name_no_ext = os.path.splitext(file_name)[0]
+    report_progress(job_id, "gemma", "Running Gemma analysis")
+    container_file_path = file_path.replace("/app/tmp/", "/workspace/AI4ME_TOOL/shared/", 1)
+    container_output_path = os.path.join(
+        "/workspace/AI4ME_TOOL/shared", job_id, file_name_no_ext
+    )
 
+    command = [
+        "python",
+        "analyze_with_gemma.py",
+        container_file_path,
+        "--shot-detection",
+        "detect",
+        "--output",
+        container_output_path,
+    ]
+
+    try:
+        print(f"[Gemma Worker] Starting Task: {file_path}")
+        if not os.path.exists(file_path):
+            raise FileNotFoundError(f"Physical file check failed: {file_path}")
+        _compose("gemma", command)
+        print(f"[Gemma Worker] Success: {file_name}")
+        shutil.rmtree(os.path.dirname(file_path), ignore_errors=True)
+        return {**payload, "gemma_result": {"success": True, "video_name": file_name}}
+    except Exception as e:
+        print(f"[Gemma Worker] Error: {str(e)}")
+        return {
+            **payload,
+            "gemma_result": {
+                "success": False,
+                "video_name": file_name,
+                "error": str(e),
+            },
+        }
+        
 @app.task(name="tasks.execute_workflow", bind=True)
 def execute_workflow(self, workflow_path, job_id, path, prompts=None, job_type="full", callback_url=None):
     """Entry point for DAG-based jobs: parses a workflow JSON template into
