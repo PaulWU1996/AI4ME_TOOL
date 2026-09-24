@@ -202,6 +202,30 @@ services:
             - driver: nvidia
               count: all
               capabilities: [ gpu ]
+  gemma:
+    build: ./gemma
+    container_name: gemma
+    working_dir: /workspace/AI4ME_TOOL/gemma
+    volumes:
+      - .:/workspace/AI4ME_TOOL
+      - ${HOME}/.cache/huggingface:/root/.cache/huggingface
+    environment:
+      - HF_TOKEN=${HF_TOKEN:-}
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility,video
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [ gpu ]
+    command: ["bash"]
+    stdin_open: true
+    tty: true
+    networks:
+      - ai_network
+    profiles: ["gemma"]
 
 networks:
   ai_network:
