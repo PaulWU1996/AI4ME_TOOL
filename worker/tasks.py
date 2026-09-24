@@ -568,7 +568,6 @@ def process_gemma(payload):
             raise FileNotFoundError(f"Physical file check failed: {file_path}")
         _compose("gemma", command)
         print(f"[Gemma Worker] Success: {file_name}")
-        shutil.rmtree(os.path.dirname(file_path), ignore_errors=True)
         return {**payload, "gemma_result": {"success": True, "video_name": file_name}}
     except Exception as e:
         print(f"[Gemma Worker] Error: {str(e)}")
