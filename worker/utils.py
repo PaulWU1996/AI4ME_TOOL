@@ -1,25 +1,24 @@
-import os
-import time
-import requests
-import xmltodict
 import json
+import os
 import subprocess
+import time
+
 import docker
 import docker.errors
-
+import requests
+import xmltodict
 from consts import (
+    HEALTH_CHECK_INTERVAL,
+    HEALTH_CHECK_TIMEOUT,
+    SERVICE_CONTAINER_NAMES,
+    api_key_path,
     compose_file,
     project_dir,
     service_modes_path,
-    SERVICE_CONTAINER_NAMES,
-    HEALTH_CHECK_TIMEOUT,
-    HEALTH_CHECK_INTERVAL,
-    api_key_path,
     shared_path,
-    visual_api_url,
     visual_api_admin_key,
+    visual_api_url,
 )
-
 
 _docker_client = None
 
@@ -124,7 +123,7 @@ def stop_service(service_name):
 
 
 # --- Support functions ---
-def save_to_disk(job_id, filename, data):
+def save_to_shared_disk(job_id, filename, data):
     output_dir = os.path.join(shared_path, job_id)
     os.makedirs(output_dir, exist_ok=True)
     with open(os.path.join(output_dir, filename), "w", encoding="utf-8") as f:

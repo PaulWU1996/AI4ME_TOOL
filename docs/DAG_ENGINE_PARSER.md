@@ -38,7 +38,12 @@ the DAG runtime now.
     `tasks.http_call` task with the call parameters baked in (url, method,
     headers, timeout, file upload field, and the `service` whose lifecycle
     the worker brackets around the request); the predecessor's result arrives
-    positionally as the request payload.
+    positionally as the request payload. Three optional fields shape a
+    node's role in the chain: `body` merges static JSON overrides into the
+    payload (e.g. pin a per-node `job_type`), `save` persists the parsed
+    response to disk as `{basename(file_path)}_{save}.json`, and `merge`
+    passes `{**payload, **response}` downstream so later nodes keep the
+    workflow context (`job_id`/`prompts`/`file_path`).
   - Every other node becomes a positional signature — the old
     merged-predecessor-payload convention is Celery's own argument passing
     now: a node after a single predecessor receives that result; a node

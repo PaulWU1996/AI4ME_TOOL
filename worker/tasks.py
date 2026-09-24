@@ -7,13 +7,11 @@ import requests
 from celery import Celery
 from consts import (
     AUDIO_REQUEST_TIMEOUT,
-    SCRIPT_REQUEST_TIMEOUT,
     VISUAL_REQUEST_TIMEOUT,
     audio_api_url,
     redis_host,
     redis_port,
     shared_path,
-    transcript_api_url,
     transcript_text_file,
     visual_api_url,
 )
@@ -23,7 +21,7 @@ from utils import (
     extract_flat_captions,
     get_speaker_turn_boundary_ms,
     load_json_file,
-    save_to_disk,
+    save_to_shared_disk,
     start_service,
     stop_service,
 )
@@ -112,15 +110,23 @@ def download_file(self, path, job_id, prompts=None):
 
 @app.task(name="tasks.http_call")
 def http_call(payload, url, method="POST", headers=None, timeout=60, file_field=None,
-              file_path_key="file_path", service=None):
+              file_path_key="file_path", service=None, body=None, merge=False, save=None):
     """Generic service call backing `driver: "http"` workflow nodes.
 
     The predecessor result arrives positionally as `payload`. With
     `file_field` set, the file at `payload[file_path_key]` is uploaded as
-    multipart/form-data; otherwise the payload is sent verbatim as a JSON
-    body. `service`, when set, starts this node's on-demand service for the
-    duration of the call and stops it (unless keepalive) afterwards.
+    multipart/form-data; otherwise the payload is sent as a JSON body with
+    the optional static `body` dict merged on top (e.g. to pin a per-node
+    `job_type`). `service`, when set, starts this node's on-demand service
+    for the duration of the call and stops it (unless keepalive) afterwards.
+    Failures raise, so a failed node aborts the chain.
+
+    `save` persists the parsed response to disk as
+    `{basename(file_path)}_{save}.json` (e.g. "summarise_output"), and
+    `merge` returns `{**payload, **response}` so a later node in the chain
+    keeps `job_id`/`prompts`/`file_path` from the workflow context.
     """
+    job_id = payload.get("job_id", "unknown_job")
     if service:
         start_service(service)
 
@@ -138,17 +144,30 @@ def http_call(payload, url, method="POST", headers=None, timeout=60, file_field=
                     headers=headers or {}, timeout=timeout,
                 )
         else:
+            request_body = {**payload, **(body or {})}
             response = requests.request(
-                method, url, json=payload, headers=headers or {}, timeout=timeout,
+                method, url, json=request_body, headers=headers or {}, timeout=timeout,
             )
         response.raise_for_status()
     finally:
         if service:
             stop_service(service)
+
     try:
-        return response.json()
+        result = response.json()
     except ValueError:
         return response.text
+
+    saved_path = None
+    if save:
+        filename = f"{job_id}_{save}.json"
+        save_to_shared_disk(job_id, filename, result)
+        saved_path = os.path.join(shared_path, job_id, filename)
+
+    output = {**payload, **result} if merge else result
+    if save:
+        output["save_path"] = saved_path
+    return output
 
 
 @app.task(name="tasks.process_visual")
@@ -197,7 +216,7 @@ def process_visual(payload):
         visual_result = extract_flat_captions(response.text)
 
         file_name_no_ext = os.path.splitext(file_name)[0]
-        save_to_disk(job_id, f"{file_name_no_ext}_visual_output.json", visual_result)
+        save_to_shared_disk(job_id, f"{file_name_no_ext}_visual_output.json", visual_result)
         print(f"[Visual Worker] Success: {len(visual_result)} segments.")
     finally:
         stop_service("visualservice")
@@ -255,7 +274,7 @@ def process_audio(payload):  # change filepath to dict inputs
         print(f"[Audio Worker] Success: Received {len(outputs)} items.")
 
         file_name_no_ext = os.path.splitext(file_name)[0]
-        save_to_disk(job_id, f"{file_name_no_ext}_audio_output.json", outputs)
+        save_to_shared_disk(job_id, f"{file_name_no_ext}_audio_output.json", outputs)
     finally:
         stop_service("audioservice")
 
@@ -403,86 +422,6 @@ def finalize_results(job_id, job_type="full", callback_url=None, expects=None):
     return final_output
 
 
-
-def run_service_task(
-    payload: dict,
-    job_type: str,
-    service_name: str,
-    log_tag: str,
-    file_suffix: str,
-    result_key: str,
-    api_url: str,
-) -> dict:
-    """Helper function to execute script processing tasks with shared service
-
-    management, HTTP requesting, and output saving.
-    """
-    job_id = payload.get("job_id")
-    result_template = {
-        "type": job_type,
-        "success": False,
-        "output": None,
-        "error": None,
-    }
-
-    try:
-        start_service(service_name)
-        print(f"{log_tag} Starting Task: {job_id}")
-
-        response = requests.post(
-            api_url,
-            json={
-                "job_id": job_id,
-                "job_type": job_type,
-                "prompts": payload.get("prompts"),
-            },
-            timeout=SCRIPT_REQUEST_TIMEOUT,
-        )
-        response.raise_for_status()
-
-        result = response.json()
-        result_template.update({"success": True, "output": result})
-
-        file_path = payload.get("file_path", "")
-        file_name_no_ext = os.path.splitext(os.path.basename(file_path))[0]
-        save_to_disk(job_id, f"{file_name_no_ext}_{file_suffix}.json", result)
-        print(f"{log_tag} Success.")
-
-    except Exception as e:
-        print(f"{log_tag} Error: {str(e)}")
-        result_template["error"] = str(e)
-    finally:
-        stop_service(service_name)
-
-    return {**payload, result_key: result_template}
-
-
-@app.task(name="tasks.process_summarise")
-def process_summarise(payload):
-    return run_service_task(
-        payload=payload,
-        job_type="summary",
-        service_name="transcriptservice",
-        log_tag="[Summarise Worker]",
-        file_suffix="summarise_output",
-        result_key="summarise_result",
-        api_url=transcript_api_url
-    )
-
-
-@app.task(name="tasks.process_tags")
-def process_tags(payload):
-    return run_service_task(
-        payload=payload,
-        job_type="tagging",
-        service_name="transcriptservice",
-        log_tag="[Tagging Worker]",
-        file_suffix="tagging_output",
-        result_key="tagging_result",
-        api_url=transcript_api_url
-    )
-
-
 @app.task(name="tasks.speaker_extent")
 def speaker_extent(payload):
     file_path = os.path.normpath(payload["file_path"])
@@ -506,10 +445,10 @@ def speaker_extent(payload):
     file_name = os.path.basename(file_path)
     file_name_no_ext = os.path.splitext(file_name)[0]
     trimmed_file_name = f"{file_name_no_ext}_trimmed.json"
-    save_to_disk(job_id, trimmed_file_name, transcript)
+    save_to_shared_disk(job_id, trimmed_file_name, transcript)
 
     extent_result = {"start": start_speaker_ms, "end": end_speaker_ms}
-    save_to_disk(job_id, f"{file_name_no_ext}_extent_output.json", extent_result)
+    save_to_shared_disk(job_id, f"{file_name_no_ext}_extent_output.json", extent_result)
 
     trimmed_file_path = os.path.join(os.path.dirname(file_path), trimmed_file_name)
     print(f"[Speaker Extent] Trimmed to speaker range: {start_speaker_ms}ms - {end_speaker_ms}ms")
@@ -540,7 +479,7 @@ def segment_extent(payload):
     file_name_no_ext = os.path.splitext(file_name)[0]
 
     extent_result = {"start": start_ms, "end": end_ms}
-    save_to_disk(job_id, f"{file_name_no_ext}_extent_output.json", extent_result)
+    save_to_shared_disk(job_id, f"{file_name_no_ext}_extent_output.json", extent_result)
 
     print(f"[Segment Extent] Extracted range: {start_ms}ms - {end_ms}ms")
     return {**payload, "start": start_ms, "end": end_ms}
@@ -569,7 +508,7 @@ def transcript_to_text(payload):
         if seg.get("text", "").strip()
     )
 
-    save_to_disk(job_id, transcript_text_file, text)
+    save_to_shared_disk(job_id, transcript_text_file, text)
 
     txt_path = os.path.join(os.path.dirname(file_path), transcript_text_file)
     print(f"[Transcript to Text] Saved text to {txt_path}")

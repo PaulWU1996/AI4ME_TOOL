@@ -126,7 +126,7 @@ GET /status/{job_id} returns results (or callback_url receives them)
 - `COMPOSE_PROJECT_DIR`, `COMPOSE_FILE` — docker-compose context for `_compose()` helper
 - `SERVICE_MODES_PATH` — path to the resolved cold-start/keepalive selection written by `scripts/start.sh` (default `/app/tmp/service_modes.json`)
 - `HEALTH_CHECK_TIMEOUT` / `HEALTH_CHECK_INTERVAL` — container health poll budget and cadence (defaults 330s / 60s)
-- `VISUAL_REQUEST_TIMEOUT` / `AUDIO_REQUEST_TIMEOUT` / `SCRIPT_REQUEST_TIMEOUT` — how long to wait on a service's HTTP response before giving up (defaults 6000s / 1800s / 1800s). A service that accepts the connection and then never answers blocks the worker for this long
+- `VISUAL_REQUEST_TIMEOUT` / `AUDIO_REQUEST_TIMEOUT` — how long to wait on a service's HTTP response before giving up (defaults 6000s / 1800s). A service that accepts the connection and then never answers blocks the worker for this long
 
 ## Service Modes
 

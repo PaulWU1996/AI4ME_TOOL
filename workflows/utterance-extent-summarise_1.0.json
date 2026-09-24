@@ -39,7 +39,14 @@
     },
     {
       "id": "summarise",
-      "task": "process_summarise",
+      "driver": "http",
+      "url": "http://transcriptservice:8000/process",
+      "body": {
+        "job_type": "summary"
+      },
+      "merge": true,
+      "save": "summarise_output",
+      "timeout": 1800,
       "service": "transcriptservice",
       "depends_on": [
         "transcript"
@@ -47,7 +54,14 @@
     },
     {
       "id": "tagging",
-      "task": "process_tags",
+      "driver": "http",
+      "url": "http://transcriptservice:8000/process",
+      "body": {
+        "job_type": "tagging"
+      },
+      "merge": true,
+      "save": "tagging_output",
+      "timeout": 1800,
       "service": "transcriptservice",
       "depends_on": [
         "summarise"

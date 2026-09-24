@@ -77,8 +77,6 @@ services:
       - AUDIO_PORT=8000
       - VISUAL_HOST=visualservice
       - VISUAL_PORT=8000
-      - TRANSCRIPT_HOST=transcriptservice
-      - TRANSCRIPT_PORT=8000
       - SHARED_PATH=/app/tmp
       - WORKFLOWS_PATH=/app/workflows
       - ADMIN_KEY=${AI4ME_ADMIN_PASSWORD}

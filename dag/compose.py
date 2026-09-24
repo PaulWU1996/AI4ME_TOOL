@@ -66,6 +66,9 @@ def build_task_map(parser: Parser, job_context: dict) -> dict:
                     "file_field": attrs.get("file_field"),
                     "file_path_key": attrs.get("file_path_key", "file_path"),
                     "service": attrs.get("service"),
+                    "body": attrs.get("body"),
+                    "merge": attrs.get("merge", False),
+                    "save": attrs.get("save"),
                 },
             )
             continue
