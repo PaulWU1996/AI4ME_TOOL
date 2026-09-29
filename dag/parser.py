@@ -63,14 +63,11 @@ def _validate_python_node(task):
             f"Python task '{node_id}' script must be relative to the task script root."
         )
 
-    unsupported = [
-        key
-        for key in ("task", "kwargs", "call", "inject", "requires", "service", "retries")
-        if key in task
-    ]
+    supported = {"id", "depends_on", "driver", "script", "params", "timeout", "merge"}
+    unsupported = sorted(set(task) - supported)
     if unsupported:
         raise ValueError(
-            f"Python task '{node_id}' does not support {unsupported}."
+            f"Python task '{node_id}' has unsupported keys: {unsupported}."
         )
     if "params" in task and not isinstance(task["params"], dict):
         raise ValueError(f"Python task '{node_id}' params must be an object.")
