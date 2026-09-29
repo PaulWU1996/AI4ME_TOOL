@@ -44,6 +44,13 @@ the DAG runtime now.
     response to disk as `{basename(file_path)}_{save}.json`, and `merge`
     passes `{**payload, **response}` downstream so later nodes keep the
     workflow context (`job_id`/`prompts`/`file_path`).
+  - A node declaring `driver: "python"` collapses to the generic
+    `tasks.python_call` task. The node names a script below the worker's
+    `/app/task_scripts` root; the predecessor's result arrives positionally
+    as JSON on stdin, and the script must return one JSON document on
+    stdout. `params` overrides payload keys before the script runs, `timeout`
+    bounds the subprocess, and `merge` returns `{**payload, **result}`.
+    Script paths are relative and cannot leave the task script root.
   - Every other node becomes a positional signature — the old
     merged-predecessor-payload convention is Celery's own argument passing
     now: a node after a single predecessor receives that result; a node
@@ -75,4 +82,6 @@ Eight workflows exercise this today:
   result).
 - `audio_only`, `visual_only`, `tagging`, `summarise`,
   `speaker-extent-summarise`, `utterance-extent-summarise` — chain
-  equivalents re-added to restore the legacy `job_type` names.
+  equivalents re-added to restore the legacy `job_type` names. The four
+  transcript/extent workflows have `1.1` versions that use the Python
+  driver; their `1.0` versions remain registered.

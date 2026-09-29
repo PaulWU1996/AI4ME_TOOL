@@ -1,4 +1,5 @@
 import json
+from pathlib import Path
 
 import networkx as nx
 
@@ -52,6 +53,35 @@ class DAG:
         return self.graph.nodes[node_id]
 
 
+def _validate_python_node(task):
+    node_id = task["id"]
+    script = task.get("script")
+    if not isinstance(script, str) or not script:
+        raise ValueError(f"Python task '{node_id}' requires a 'script' path.")
+    if Path(script).is_absolute() or ".." in Path(script).parts:
+        raise ValueError(
+            f"Python task '{node_id}' script must be relative to the task script root."
+        )
+
+    unsupported = [
+        key
+        for key in ("task", "kwargs", "call", "inject", "requires", "service", "retries")
+        if key in task
+    ]
+    if unsupported:
+        raise ValueError(
+            f"Python task '{node_id}' does not support {unsupported}."
+        )
+    if "params" in task and not isinstance(task["params"], dict):
+        raise ValueError(f"Python task '{node_id}' params must be an object.")
+    if "merge" in task and not isinstance(task["merge"], bool):
+        raise ValueError(f"Python task '{node_id}' merge must be a boolean.")
+
+    timeout = task.get("timeout", 300)
+    if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or timeout <= 0:
+        raise ValueError(f"Python task '{node_id}' timeout must be a positive number.")
+
+
 class Parser:
     def __init__(self, json_path):
         self.dag = DAG()
@@ -80,7 +110,10 @@ class Parser:
             if task['id'] in seen_ids:
                 raise ValueError(f"Duplicate task id '{task['id']}' in workflow.")
             seen_ids.add(task['id'])
-            
+
+            if task.get('driver') == 'python':
+                _validate_python_node(task)
+
             # store all other attributes of the task as node attributes
             node_attributes = {}
             for key, value in task.items():

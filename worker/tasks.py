@@ -1,6 +1,10 @@
 import glob
+import json
 import os
 import shutil
+import subprocess
+import sys
+from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 import requests
@@ -9,17 +13,17 @@ from consts import (
     AUDIO_REQUEST_TIMEOUT,
     VISUAL_REQUEST_TIMEOUT,
     audio_api_url,
+    python_call_timeout,
+    python_script_root,
     redis_host,
     redis_port,
     shared_path,
-    transcript_text_file,
     visual_api_url,
 )
 from utils import (
     _compose,
     ensure_api_key,
     extract_flat_captions,
-    get_speaker_turn_boundary_ms,
     load_json_file,
     save_to_shared_disk,
     start_service,
@@ -168,6 +172,51 @@ def http_call(payload, url, method="POST", headers=None, timeout=60, file_field=
     if save:
         output["save_path"] = saved_path
     return output
+
+
+def _task_script_path(script):
+    if not isinstance(script, str) or not script:
+        raise ValueError("python_call: 'script' must be a non-empty string.")
+    root = Path(python_script_root).resolve()
+    path = (root / script).resolve()
+    if not path.is_relative_to(root) or not path.is_file():
+        raise ValueError(f"python_call: script '{script}' is not inside {root}.")
+    return path
+
+@app.task(name="tasks.python_call")
+def python_call(payload, script, params=None, timeout=python_call_timeout, merge=False):
+    if not isinstance(payload, dict):
+        raise ValueError("python_call: payload must be a mapping.")
+    if params is not None and not isinstance(params, dict):
+        raise ValueError("python_call: params must be a mapping.")
+
+    path = _task_script_path(script)
+    request = {**payload, **(params or {})}
+    completed = subprocess.run(
+        [sys.executable, str(path)],
+        input=json.dumps(request),
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+        check=False,
+    )
+    if completed.stderr.strip():
+        print(f"[python_call] {script}: {completed.stderr.strip()}")
+    if completed.returncode != 0:
+        raise RuntimeError(
+            f"python_call: {script} exited with {completed.returncode}: {completed.stderr.strip()}"
+        )
+
+    try:
+        result = json.loads(completed.stdout)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"python_call: {script} did not return JSON.") from exc
+
+    if merge:
+        if not isinstance(result, dict):
+            raise ValueError("python_call: merge requires a JSON object result.")
+        return {**payload, **result}
+    return result
 
 
 @app.task(name="tasks.process_visual")
@@ -412,7 +461,7 @@ def finalize_results(job_id, job_type="full", callback_url=None, expects=None):
             requests.post(callback_url, json=final_output, timeout=30)
             print(f"[Callback]: final_output sent to: {callback_url}")
         except Exception as e:
-            print(f"[Callback Warning] Failed to send callback: {str(e)}")
+            print(f"[Callback Warning] Failed to send callback: {e!s}")
 
     if not job_success:
         raise RuntimeError(
@@ -422,97 +471,6 @@ def finalize_results(job_id, job_type="full", callback_url=None, expects=None):
     return final_output
 
 
-@app.task(name="tasks.speaker_extent")
-def speaker_extent(payload):
-    file_path = os.path.normpath(payload["file_path"])
-    job_id = payload["job_id"]
-
-    transcript, segments = get_transcript(file_path)
-    
-    start_speaker_ms = get_speaker_turn_boundary_ms(segments, 0, "forward")
-    end_speaker_ms = get_speaker_turn_boundary_ms(segments, len(segments) - 1, "backward")
-
-    if start_speaker_ms > end_speaker_ms:
-        start_speaker_ms = segments[0]["startMs"]
-        end_speaker_ms = segments[len(segments) - 1]["endMs"]
-
-    transcript["segments"] = [
-        seg
-        for seg in segments
-        if seg["endMs"] > start_speaker_ms and seg["startMs"] < end_speaker_ms
-    ]
-
-    file_name = os.path.basename(file_path)
-    file_name_no_ext = os.path.splitext(file_name)[0]
-    trimmed_file_name = f"{file_name_no_ext}_trimmed.json"
-    save_to_shared_disk(job_id, trimmed_file_name, transcript)
-
-    extent_result = {"start": start_speaker_ms, "end": end_speaker_ms}
-    save_to_shared_disk(job_id, f"{file_name_no_ext}_extent_output.json", extent_result)
-
-    trimmed_file_path = os.path.join(os.path.dirname(file_path), trimmed_file_name)
-    print(f"[Speaker Extent] Trimmed to speaker range: {start_speaker_ms}ms - {end_speaker_ms}ms")
-    return {
-        **payload,
-        "file_path": trimmed_file_path,
-        "start": start_speaker_ms,
-        "end": end_speaker_ms,
-    }
-
-
-@app.task(name="tasks.segment_extent")
-def segment_extent(payload):
-    file_path = os.path.normpath(payload["file_path"])
-    job_id = payload["job_id"]
-
-    _, segments = get_transcript(file_path)
-    
-    first = segments[0]
-    last = segments[len(segments) - 1]
-    start_ms = first.get("startMs", 0)
-    end_ms = last.get("endMs", 0) 
-
-    if start_ms > end_ms:
-        start_ms = end_ms
-
-    file_name = os.path.basename(file_path)
-    file_name_no_ext = os.path.splitext(file_name)[0]
-
-    extent_result = {"start": start_ms, "end": end_ms}
-    save_to_shared_disk(job_id, f"{file_name_no_ext}_extent_output.json", extent_result)
-
-    print(f"[Segment Extent] Extracted range: {start_ms}ms - {end_ms}ms")
-    return {**payload, "start": start_ms, "end": end_ms}
-
-def get_transcript(file_path):
-    transcript = load_json_file(file_path)
-    if not transcript:
-        raise ValueError("Failed to load transcript")
-
-    segments = transcript.get("segments", [])
-    if not segments:
-        raise ValueError("No segments found in transcript")
-
-    return transcript, segments
-
-@app.task(name="tasks.transcript_to_text")
-def transcript_to_text(payload):
-    file_path = os.path.normpath(payload["file_path"])
-    job_id = payload["job_id"]
-
-    _, segments = get_transcript(file_path)
-    
-    text = " ".join(
-        seg.get("text", "").strip() 
-        for seg in segments 
-        if seg.get("text", "").strip()
-    )
-
-    save_to_shared_disk(job_id, transcript_text_file, text)
-
-    txt_path = os.path.join(os.path.dirname(file_path), transcript_text_file)
-    print(f"[Transcript to Text] Saved text to {txt_path}")
-    return {**payload, "file_path": txt_path}
 
 @app.task(name="tasks.process_gemma")
 def process_gemma(payload):

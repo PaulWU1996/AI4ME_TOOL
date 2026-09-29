@@ -224,3 +224,15 @@ def load_json_file(file_path) -> dict | None:
     except Exception as e:
         print(f"[Error] Failed to read {file_path}: {e}")
         return None
+
+
+def get_transcript(file_path):
+    transcript = load_json_file(file_path)
+    if not transcript:
+        raise ValueError("Failed to load transcript")
+
+    segments = transcript.get("segments", [])
+    if not segments:
+        raise ValueError("No segments found in transcript")
+
+    return transcript, segments

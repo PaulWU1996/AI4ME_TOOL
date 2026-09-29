@@ -19,6 +19,8 @@ visual_api_url = f"http://{visual_host}:{visual_port}"
 
 shared_path = os.getenv("SHARED_PATH", "/app/tmp")
 api_key_path = os.getenv("API_KEY_PATH", "/app/data")
+python_script_root = os.getenv("PYTHON_SCRIPT_ROOT", "/app/task_scripts")
+python_call_timeout = int(os.getenv("PYTHON_CALL_TIMEOUT", "300"))
 
 # --- Config Settings ---
 compose_file = os.getenv("COMPOSE_FILE", "/app/docker-compose.yml")
