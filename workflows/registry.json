@@ -32,46 +32,34 @@
     }
   },
   "tagging": {
-    "latest": "1.1",
+    "latest": "1.0",
     "versions": {
       "1.0": {
         "path": "/app/workflows/tagging_1.0.json"
-      },
-      "1.1": {
-        "path": "/app/workflows/tagging_1.1.json"
       }
     }
   },
   "summarise": {
-    "latest": "1.1",
+    "latest": "1.0",
     "versions": {
       "1.0": {
         "path": "/app/workflows/summarise_1.0.json"
-      },
-      "1.1": {
-        "path": "/app/workflows/summarise_1.1.json"
       }
     }
   },
   "speaker-extent-summarise": {
-    "latest": "1.1",
+    "latest": "1.0",
     "versions": {
       "1.0": {
         "path": "/app/workflows/speaker-extent-summarise_1.0.json"
-      },
-      "1.1": {
-        "path": "/app/workflows/speaker-extent-summarise_1.1.json"
       }
     }
   },
   "utterance-extent-summarise": {
-    "latest": "1.1",
+    "latest": "1.0",
     "versions": {
       "1.0": {
         "path": "/app/workflows/utterance-extent-summarise_1.0.json"
-      },
-      "1.1": {
-        "path": "/app/workflows/utterance-extent-summarise_1.1.json"
       }
     }
   }

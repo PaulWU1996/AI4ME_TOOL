@@ -104,6 +104,10 @@ def download_file(self, path, job_id, prompts=None):
             # /process_audio/ expects it -- lets an http-driver node forward
             # this payload directly with no service-specific field mapping.
             "video_path": f"{job_id}/{filename}",
+            # Downstream driver: "python" nodes run outside this module and
+            # cannot read the worker's consts, so the workspace root travels
+            # with the payload.
+            "shared_path": shared_path,
             "job_id": job_id,
             "prompts": prompts,
         }

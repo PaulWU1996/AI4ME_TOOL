@@ -19,7 +19,7 @@ visual_api_url = f"http://{visual_host}:{visual_port}"
 
 shared_path = os.getenv("SHARED_PATH", "/app/tmp")
 api_key_path = os.getenv("API_KEY_PATH", "/app/data")
-python_script_root = os.getenv("PYTHON_SCRIPT_ROOT", "/app/task_scripts")
+python_script_root = os.getenv("PYTHON_SCRIPT_ROOT", "/app/services")
 python_call_timeout = int(os.getenv("PYTHON_CALL_TIMEOUT", "300"))
 
 # --- Config Settings ---
@@ -38,8 +38,6 @@ service_modes_path = os.getenv("SERVICE_MODES_PATH", "/app/tmp/service_modes.jso
 # `_compose()` needs. Empty/unset (the production default) preserves
 # today's exact behavior: container_name is assumed to equal service_name.
 SERVICE_CONTAINER_NAMES = json.loads(os.getenv("SERVICE_CONTAINER_NAMES", "{}"))
-
-transcript_text_file = "transcript.txt"
 
 # How long start_service() waits for a container to report healthy, and how
 # often it re-checks. Defaults are sized for GPU services loading multi-GB

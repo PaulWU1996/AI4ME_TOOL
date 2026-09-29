@@ -223,15 +223,17 @@ A workflow template declares its nodes with `id`, `task` (a function in `worker/
 | `requires: [...]` | For `call: "kwargs"` nodes — keys that must resolve at pre-flight, or the job fails fast. |
 | `terminal: true` | The node whose output is the job's `/status` result (a workflow's summary/finalize step). |
 | `service` / `retries` | On-demand service this node's worker starts/stops around the node (per-worker lifecycle manager in `worker/utils.py`); node-level retry count (honored on `download_file` by its task-level `autoretry_for`). |
-| `driver: "python"` | Runs a script from `worker/task_scripts/`. The script receives the predecessor payload as JSON on stdin and returns one JSON document on stdout. `script` is relative to `/app/task_scripts`; `params` are static input overrides, `timeout` is in seconds, and `merge` preserves the payload for the next node. |
+| `driver: "python"` | Runs a script from `services/`. The script receives the predecessor payload as JSON on stdin and returns one JSON document on stdout. `script` is relative to `/app/services`, so a node names its module (`audio-transcription/transcript_to_text.py`); `params` are static input overrides, `timeout` is in seconds, and `merge` preserves the payload for the next node. |
 
 Python scripts run inside the worker, so workflow registration must stay a trusted, internal operation. The worker has host mounts and Docker socket access; do not expose `POST /workflows` to untrusted callers.
+
+A script receives the predecessor payload on stdin, so it has no access to the worker's own modules or constants. Anything it needs beyond the payload must travel in that payload: `download_file` returns `file_path`, `video_path`, `shared_path`, `job_id`, and `prompts`, and a node with `merge: true` passes them on to the next node.
 
 For example, a transcript step can be written as:
 
 ```json
 { "id": "transcript", "driver": "python",
-  "script": "transcript_to_text.py", "merge": true,
+  "script": "audio-transcription/transcript_to_text.py", "merge": true,
   "depends_on": ["download"] }
 ```
 

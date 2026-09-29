@@ -2,13 +2,14 @@ import json
 import os
 import sys
 
-from consts import transcript_text_file
-from utils import get_transcript, save_to_shared_disk
+from transcript import get_transcript, transcript_text_file
+from utils import save_to_shared_disk
 
 
 def run(payload):
     file_path = os.path.normpath(payload["file_path"])
     job_id = payload["job_id"]
+    shared_path = payload["shared_path"]
 
     _, segments = get_transcript(file_path)
     text = " ".join(
@@ -17,7 +18,7 @@ def run(payload):
         if segment.get("text", "").strip()
     )
 
-    save_to_shared_disk(job_id, transcript_text_file, text)
+    save_to_shared_disk(shared_path, job_id, transcript_text_file, text)
     return {"file_path": os.path.join(os.path.dirname(file_path), transcript_text_file)}
 
 

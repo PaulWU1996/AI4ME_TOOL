@@ -2,12 +2,14 @@ import json
 import os
 import sys
 
-from utils import get_speaker_turn_boundary_ms, get_transcript, save_to_shared_disk
+from transcript import get_speaker_turn_boundary_ms, get_transcript
+from utils import save_to_shared_disk
 
 
 def run(payload):
     file_path = os.path.normpath(payload["file_path"])
     job_id = payload["job_id"]
+    shared_path = payload["shared_path"]
 
     transcript, segments = get_transcript(file_path)
     start = get_speaker_turn_boundary_ms(segments, 0, "forward")
@@ -25,8 +27,8 @@ def run(payload):
 
     stem = os.path.splitext(os.path.basename(file_path))[0]
     trimmed_name = f"{stem}_trimmed.json"
-    save_to_shared_disk(job_id, trimmed_name, transcript)
-    save_to_shared_disk(job_id, f"{stem}_extent_output.json", {"start": start, "end": end})
+    save_to_shared_disk(shared_path, job_id, trimmed_name, transcript)
+    save_to_shared_disk(shared_path, job_id, f"{stem}_extent_output.json", {"start": start, "end": end})
 
     return {
         "file_path": os.path.join(os.path.dirname(file_path), trimmed_name),
