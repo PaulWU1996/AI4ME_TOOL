@@ -1,6 +1,6 @@
 {
   "workflow": {
-    "name": "utterance-extent-summarise",
+    "name": "semantic-extent-summarise",
     "version": "1.0"
   },
   "settings": {
@@ -25,8 +25,12 @@
     },
     {
       "id": "extent",
-      "driver": "python",
-      "script": "audio-transcription/segment_extent.py",
+      "driver": "http",
+      "url": "http://audiotranscriptionservice:8000/process",
+      "body": {
+        "job_type": "semantic_extent"
+      },
+      "timeout": 600,
       "merge": true,
       "depends_on": [
         "download"
@@ -34,8 +38,12 @@
     },
     {
       "id": "transcript",
-      "driver": "python",
-      "script": "audio-transcription/transcript_to_text.py",
+      "driver": "http",
+      "url": "http://audiotranscriptionservice:8000/process",
+      "body": {
+        "job_type": "transcript_to_text"
+      },
+      "timeout": 300,
       "merge": true,
       "depends_on": [
         "extent"

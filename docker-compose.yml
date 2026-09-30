@@ -170,10 +170,12 @@ services:
       timeout: 30s
       retries: 3
       start_period: 5m
-
+  
+  # TODO: Rename - llmservice (might require some internal name changes for clarity) 
   transcriptservice:
-    profiles: [ "on-demand", "llm" ]
-    # image: ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/ai4me/summarise:summarise
+    profiles: ["on-demand", "llm", "transcription" ]
+    build: services/llm-tools
+    image: ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/ai4me/summarise:summarise
     container_name: transcriptservice
     ports:
       - "9003:8000"
@@ -202,8 +204,40 @@ services:
             - driver: nvidia
               count: all
               capabilities: [ gpu ]
+
+  # TODO: Rename
+  audiotranscriptionservice:
+    profiles: [ "on-demand", "transcription"]
+    build: services/audio-transcription
+    container_name: audiotranscriptionservice
+    ports:
+      - "9005:8000"
+    volumes:
+      # Same mount path as the worker, so a node's payload (file_path,
+      # shared_path) resolves here with no field mapping.
+      - ./shared:/app/tmp
+      - ${HOME}/.cache/huggingface:/root/.cache/huggingface
+    environment:
+      - SHARED_PATH=/app/tmp
+    networks:
+      - ai_network
+    restart: no
+    healthcheck:
+      test: [ "CMD", "python3", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/health', timeout=5).status == 200 else 1)" ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [ gpu ]
+
   gemma:
-    build: ./gemma
+    build: ./services/video-transcription
     container_name: gemma
     working_dir: /workspace/AI4ME_TOOL/gemma
     volumes:

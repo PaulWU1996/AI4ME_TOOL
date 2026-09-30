@@ -30,12 +30,6 @@ from utils import (
     stop_service,
 )
 
-# Service lifecycle is a per-worker concern: the worker owns this node's
-# on-demand service containers, starting them on demand (keepalive-aware)
-# and stopping them when a task is done. Concurrency is serialized by the
-# queue: one worker per node's instances, concurrency=1 -- so a task's
-# start/work/stop bracket can never race another task's.
-
 # --- Celery ---
 app = Celery(
     "tasks",
@@ -125,8 +119,7 @@ def http_call(payload, url, method="POST", headers=None, timeout=60, file_field=
     `file_field` set, the file at `payload[file_path_key]` is uploaded as
     multipart/form-data; otherwise the payload is sent as a JSON body with
     the optional static `body` dict merged on top (e.g. to pin a per-node
-    `job_type`). `service`, when set, starts this node's on-demand service
-    for the duration of the call and stops it (unless keepalive) afterwards.
+    `job_type`).
     Failures raise, so a failed node aborts the chain.
 
     `save` persists the parsed response to disk as
@@ -135,37 +128,32 @@ def http_call(payload, url, method="POST", headers=None, timeout=60, file_field=
     keeps `job_id`/`prompts`/`file_path` from the workflow context.
     """
     job_id = payload.get("job_id", "unknown_job")
-    if service:
-        start_service(service)
 
-    try:
-        if file_field:
-            local_path = payload.get(file_path_key)
-            if not local_path:
-                raise ValueError(
-                    f"http_call: no '{file_path_key}' in payload to upload as '{file_field}'."
-                )
-            with open(local_path, "rb") as f:
-                response = requests.request(
-                    method, url,
-                    files={file_field: (os.path.basename(local_path), f)},
-                    headers=headers or {}, timeout=timeout,
-                )
-        else:
-            request_body = {**payload, **(body or {})}
-            response = requests.request(
-                method, url, json=request_body, headers=headers or {}, timeout=timeout,
+    if file_field:
+        local_path = payload.get(file_path_key)
+        if not local_path:
+            raise ValueError(
+                f"http_call: no '{file_path_key}' in payload to upload as '{file_field}'."
             )
-        response.raise_for_status()
-    finally:
-        if service:
-            stop_service(service)
+        with open(local_path, "rb") as f:
+            response = requests.request(
+                method, url,
+                files={file_field: (os.path.basename(local_path), f)},
+                headers=headers or {}, timeout=timeout,
+            )
+    else:
+        request_body = {**payload, **(body or {})}
+        response = requests.request(
+            method, url, json=request_body, headers=headers or {}, timeout=timeout,
+        )
+    response.raise_for_status()
 
     try:
         result = response.json()
     except ValueError:
         return response.text
 
+    # TODO: remove this and encapsulate in task
     saved_path = None
     if save:
         filename = f"{job_id}_{save}.json"
