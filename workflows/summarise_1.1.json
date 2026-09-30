@@ -1,7 +1,7 @@
 {
   "workflow": {
     "name": "summarise",
-    "version": "1.0"
+    "version": "1.1"
   },
   "settings": {
     "on_failure": "stop",
@@ -25,8 +25,12 @@
     },
     {
       "id": "transcript",
-      "driver": "python",
-      "script": "audio-transcription/transcript_to_text.py",
+      "driver": "http",
+      "url": "http://audiotranscriptionservice:8000/process",
+      "body": {
+        "job_type": "transcript_to_text"
+      },
+      "timeout": 300,
       "merge": true,
       "depends_on": [
         "download"
@@ -42,7 +46,6 @@
       "merge": true,
       "save": "summarise_output",
       "timeout": 1800,
-      "service": "transcriptservice",
       "depends_on": [
         "transcript"
       ]

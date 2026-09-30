@@ -25,14 +25,18 @@
     },
     {
       "id": "extent",
-      "task": "segment_extent",
+      "driver": "python",
+      "script": "audio-transcription/segment_extent.py",
+      "merge": true,
       "depends_on": [
         "download"
       ]
     },
     {
       "id": "transcript",
-      "task": "transcript_to_text",
+      "driver": "python",
+      "script": "audio-transcription/transcript_to_text.py",
+      "merge": true,
       "depends_on": [
         "extent"
       ]
@@ -47,7 +51,6 @@
       "merge": true,
       "save": "summarise_output",
       "timeout": 1800,
-      "service": "transcriptservice",
       "depends_on": [
         "transcript"
       ]
@@ -62,7 +65,6 @@
       "merge": true,
       "save": "tagging_output",
       "timeout": 1800,
-      "service": "transcriptservice",
       "depends_on": [
         "summarise"
       ]

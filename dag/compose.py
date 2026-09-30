@@ -43,6 +43,9 @@ def build_task_map(parser: Parser, job_context: dict) -> dict:
     - A node declaring `driver: "http"` becomes the generic `tasks.http_call`
       task, with the call parameters baked in; the predecessor's result
       arrives positionally as the request payload.
+    - A node declaring `driver: "python"` becomes the generic
+      `tasks.python_call` task, with the script path and its parameters baked
+      in; the predecessor's result arrives positionally as the script input.
     - Every other node receives the previous link's result positionally —
       the single-predecessor merged-payload convention.
 
@@ -69,6 +72,18 @@ def build_task_map(parser: Parser, job_context: dict) -> dict:
                     "body": attrs.get("body"),
                     "merge": attrs.get("merge", False),
                     "save": attrs.get("save"),
+                },
+            )
+            continue
+
+        if attrs.get("driver") == "python":
+            signatures[node_id] = signature(
+                "tasks.python_call",
+                kwargs={
+                    "script": attrs.get("script"),
+                    "params": attrs.get("params") or {},
+                    "timeout": attrs.get("timeout", 300),
+                    "merge": attrs.get("merge", False),
                 },
             )
             continue

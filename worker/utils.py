@@ -202,15 +202,6 @@ def extract_flat_captions(xml_body):
         for seg in raw_segments
     ]
 
-def get_speaker_turn_boundary_ms(segments: list[dict], index: int, search_direction: str) -> int:
-    speaker = segments[index]["speaker"]
-    step = 1 if search_direction == "forward" else -1
-    i = index
-
-    while 0 <= i + step < len(segments) and segments[i + step]["speaker"] == speaker:
-        i += step
-
-    return segments[i]["endMs"] if search_direction == "forward" else segments[i]["startMs"]
 
 def load_json_file(file_path) -> dict | None:
     try:
