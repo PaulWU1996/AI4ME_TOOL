@@ -1,15 +1,16 @@
-# Base image: Python 3.12 on Debian slim
-FROM mcr.microsoft.com/azureml/openmpi5.0-cuda12.6-ubuntu24.04 as base
+# Base image: Python 3.12 + CUDA 12.6 on Ubuntu 24.04
+FROM mcr.microsoft.com/azureml/openmpi5.0-cuda12.6-ubuntu24.04
 
 # Always non-interactive apt and sane Python defaults
 ENV DEBIAN_FRONTEND=noninteractive \
-	PIP_NO_CACHE_DIR=1 \
 	PYTHONDONTWRITEBYTECODE=1 \
-	PYTHONUNBUFFERED=1
+	PYTHONUNBUFFERED=1 \
+	PIP_NO_CACHE_DIR=1
 
-# System dependencies required by OpenCV and MediaPipe
+# System dependencies required by OpenCV, MediaPipe and the compose healthcheck
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
+	curl \
 	git \
 	ffmpeg \
 	libsndfile1 \
@@ -17,19 +18,26 @@ RUN apt-get update \
 	libglib2.0-0 \
  && rm -rf /var/lib/apt/lists/*
 
-WORKDIR /workspace/AI4ME_TOOL/gemma
+WORKDIR /app
 
 # Install Python deps first (better caching)
-COPY requirements.txt /tmp/gemma-requirements.txt
+COPY requirements.txt /tmp/requirements.txt
 RUN python -m pip install --upgrade pip \
- && pip install --no-cache-dir -r /tmp/gemma-requirements.txt
+ && pip install --no-cache-dir -r /tmp/requirements.txt
 
-# Keep the script available when the repository is not bind-mounted.
+# Application code (most frequently changed; always last)
+COPY app/ ./app/
+COPY scripts/ ./scripts/
 COPY analyze_with_gemma.py ./analyze_with_gemma.py
+RUN chmod +x /app/scripts/entrypoint.sh
 
-# Make the repository root available to imports and preserve host-relative paths.
-ENV PYTHONPATH=/workspace
+# `app.main:app` is imported from inside a task/router body, so the working
+# directory must be importable.
+ENV PYTHONPATH=/app
 
-# Default to an interactive shell; override with `docker run ... <cmd>` or compose
-CMD ["bash"]
+# Declare mount points so Docker creates them with correct ownership
+RUN mkdir -p /shared /root/.cache/huggingface
 
+EXPOSE 8000
+
+ENTRYPOINT ["/app/scripts/entrypoint.sh"]
