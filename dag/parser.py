@@ -1,7 +1,18 @@
-import networkx as nx
 import json
+from pathlib import Path
+
+import networkx as nx
+
 
 class DAG:
+    """A directed acyclic graph of workflow nodes.
+
+    Kept to what the controller's composer and workflow validation actually
+    use: build (add_node/add_edge), validate (has_cycle/is_valid_dag), and
+    traverse (topological_sort, get_predecessors, get_all_nodes,
+    get_node_attributes).
+    """
+
     def __init__(self):
         self.graph = nx.DiGraph()
 
@@ -21,6 +32,10 @@ class DAG:
         except nx.NetworkXNoCycle:
             return False
 
+    def is_valid_dag(self):
+        """Check if the graph is a valid DAG (no cycles)."""
+        return not self.has_cycle()
+
     def topological_sort(self):
         """Return a list of nodes in topological order."""
         return list(nx.topological_sort(self.graph))
@@ -29,56 +44,40 @@ class DAG:
         """Get all predecessors of a node."""
         return list(self.graph.predecessors(node_id))
 
-    def get_successors(self, node_id):
-        """Get all successors of a node."""
-        return list(self.graph.successors(node_id))
-
     def get_all_nodes(self):
         """Get all nodes in the DAG."""
         return list(self.graph.nodes())
-
-    def get_all_edges(self):
-        """Get all edges in the DAG."""
-        return list(self.graph.edges())
 
     def get_node_attributes(self, node_id):
         """Get attributes of a specific node."""
         return self.graph.nodes[node_id]
 
-    def get_edge_attributes(self, from_node, to_node):
-        """Get attributes of a specific edge."""
-        try:
-            return self.graph[from_node][to_node]
-        except KeyError:
-            return {}
 
-    def remove_node(self, node_id):
-        """Remove a node and all its edges."""
-        self.graph.remove_node(node_id)
+def _validate_python_node(task):
+    node_id = task["id"]
+    script = task.get("script")
+    if not isinstance(script, str) or not script:
+        raise ValueError(f"Python task '{node_id}' requires a 'script' path.")
+    if Path(script).is_absolute() or ".." in Path(script).parts:
+        raise ValueError(
+            f"Python task '{node_id}' script must be relative to the task script root."
+        )
 
-    def remove_edge(self, from_node, to_node):
-        """Remove an edge between two nodes."""
-        self.graph.remove_edge(from_node, to_node)
+    supported = {"id", "depends_on", "driver", "script", "params", "timeout", "merge"}
+    unsupported = sorted(set(task) - supported)
+    if unsupported:
+        raise ValueError(
+            f"Python task '{node_id}' has unsupported keys: {unsupported}."
+        )
+    if "params" in task and not isinstance(task["params"], dict):
+        raise ValueError(f"Python task '{node_id}' params must be an object.")
+    if "merge" in task and not isinstance(task["merge"], bool):
+        raise ValueError(f"Python task '{node_id}' merge must be a boolean.")
 
-    def is_valid_dag(self):
-        """Check if the graph is a valid DAG (no cycles)."""
-        return not self.has_cycle()
+    timeout = task.get("timeout", 300)
+    if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or timeout <= 0:
+        raise ValueError(f"Python task '{node_id}' timeout must be a positive number.")
 
-    def get_node_count(self):
-        """Get the number of nodes in the DAG."""
-        return self.graph.number_of_nodes()
-
-    def get_edge_count(self):
-        """Get the number of edges in the DAG."""
-        return self.graph.number_of_edges()
-
-    def get_ancestors(self, node_id):
-        """Get all ancestors of a node (excluding the node itself)."""
-        return nx.ancestors(self.graph, node_id)
-
-    def get_descendants(self, node_id):
-        """Get all descendants of a node (excluding the node itself)."""
-        return nx.descendants(self.graph, node_id)
 
 class Parser:
     def __init__(self, json_path):
@@ -88,50 +87,54 @@ class Parser:
         self.parse(json_path)
 
     def parse(self, json_path):
-        """parse a JSON file and build the DAG from it.
+        """Parse a JSON file and build the DAG from it.
 
         Args:
-            json_path (str): path to the JSON file containing the DAG definition.
+            json_path (str): path to the JSON file containing the DAG
+                definition.
         """
-
         with open(json_path, 'r') as f:
             workflow = json.load(f)
 
         self.metadata = workflow.get('workflow', {})
         self.settings = workflow.get('settings', {})
 
-        tasks = workflow.get('tasks', [])
-
-        structural_keys = {'id', 'depends_on', 'attributes'}
+        structural_keys = {'id', 'depends_on'}
         seen_ids = set()
-        for task in tasks:
-            # networkx merges attributes when add_node() is called twice with
-            # the same id, so a duplicate would silently collapse two tasks
-            # into one and lose whichever was declared first, with no error.
+        for task in workflow.get('tasks', []):
+            if 'id' not in task:
+                raise ValueError("Every task must have an 'id' field.")
             if task['id'] in seen_ids:
                 raise ValueError(f"Duplicate task id '{task['id']}' in workflow.")
             seen_ids.add(task['id'])
-            # 'attributes' (a legacy nested dict) is merged first; any
-            # top-level field on the task object (task, driver, func,
-            # module, url, service, kwargs, ...) is layered on top and
-            # wins on conflict, since it's the more specific declaration.
-            node_attributes = dict(task.get('attributes', {}))
+
+            if task.get('driver') == 'python':
+                _validate_python_node(task)
+
+            # store all other attributes of the task as node attributes
+            node_attributes = {}
             for key, value in task.items():
                 if key not in structural_keys:
                     node_attributes[key] = value
             self.dag.add_node(task['id'], **node_attributes)
 
-        declared_ids = {task['id'] for task in tasks}
+        declared_ids = {task['id'] for task in workflow.get('tasks', [])}
 
-        for task in tasks:
-            # Handle 'depends_on' field properly (as used in your JSON)
+        for task in workflow.get('tasks', []):
             dependencies = task.get('depends_on', [])
             for dependency in dependencies:
                 if dependency not in declared_ids:
                     raise ValueError(
                         f"Task '{task['id']}' depends on undeclared task '{dependency}'."
                     )
-                self.dag.add_edge(dependency, task['id'])  # Add edge with dependency
+                self.dag.add_edge(dependency, task['id'])
 
         if not self.dag.is_valid_dag():
             raise ValueError("The provided workflow contains cycles and is not a valid DAG.")
+        
+        
+    # validate_http_node
+    # ensure a node designated as an HTTP service has the required fields and valid values
+
+    # validate_docker_node
+    # ensure a node designated as a Docker service has the required fields and valid values

@@ -1,0 +1,28 @@
+services:
+  video-transcription:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: ai4me-video-transcription:latest
+    container_name: video-transcription
+    ports:
+      - "9004:8000"
+    volumes:
+      - ./shared:/shared
+      - ${HF_HOME:-$HOME/.cache/huggingface}:/root/.cache/huggingface
+    environment:
+      - HF_TOKEN=${HF_TOKEN:-}
+      - MODEL_ID=${MODEL_ID:-google/gemma-4-E4B-it}
+      - AUDIO_MODEL_ID=${AUDIO_MODEL_ID:-google/gemma-4-E4B-it}
+      - SHARED_VOLUME_PATH=/shared
+      - UVICORN_WORKERS=1
+      - UVICORN_LOG_LEVEL=info
+      - MAX_TOTAL_FRAMES=96
+      - AUDIO_MAX_SECONDS=30
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 5m
+    restart: unless-stopped

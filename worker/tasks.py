@@ -1,38 +1,34 @@
 import glob
+import json
 import os
 import shutil
+import subprocess
+import sys
+from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 import requests
 from celery import Celery
 from consts import (
     AUDIO_REQUEST_TIMEOUT,
-    SCRIPT_REQUEST_TIMEOUT,
     VISUAL_REQUEST_TIMEOUT,
     audio_api_url,
+    python_call_timeout,
+    python_script_root,
     redis_host,
     redis_port,
     shared_path,
-    transcript_api_url,
-    transcript_text_file,
     visual_api_url,
 )
 from utils import (
+    _compose,
     ensure_api_key,
     extract_flat_captions,
-    get_speaker_turn_boundary_ms,
     load_json_file,
-    save_to_disk,
+    save_to_shared_disk,
+    start_service,
+    stop_service,
 )
-
-# Service lifecycle goes through the lease in dag/readiness.py rather than
-# calling utils.start_service/stop_service directly. The lease is
-# reference-counted and re-entrant, so when a task runs as a DAG node whose
-# workflow also declares `service`, the engine's bracket and this one nest
-# into a single start/stop instead of cycling the container twice.
-from dag.engine import DAGEngine
-from dag.parser import Parser
-from dag.readiness import ensure_ready, release
 
 # --- Celery ---
 app = Celery(
@@ -50,9 +46,17 @@ app.conf.update(
     task_reject_on_worker_lost=True,
 )
 
+def report_progress(job_id, stage, message):
+    app.backend.store_result(
+        job_id,
+        {"job_id": job_id, "stage": stage, "message": message},
+        state="PROGRESS",
+    )
+
 
 # --- Download Task ---
-@app.task(name="tasks.download_file", bind=True)
+@app.task(name="tasks.download_file", bind=True, autoretry_for=(Exception,),
+          max_retries=3, retry_backoff=1.0, retry_backoff_max=60.0)
 def download_file(self, path, job_id, prompts=None):
     output_dir = os.path.join(shared_path, job_id)
     os.makedirs(output_dir, exist_ok=True)
@@ -94,6 +98,10 @@ def download_file(self, path, job_id, prompts=None):
             # /process_audio/ expects it -- lets an http-driver node forward
             # this payload directly with no service-specific field mapping.
             "video_path": f"{job_id}/{filename}",
+            # Downstream driver: "python" nodes run outside this module and
+            # cannot read the worker's consts, so the workspace root travels
+            # with the payload.
+            "shared_path": shared_path,
             "job_id": job_id,
             "prompts": prompts,
         }
@@ -102,15 +110,115 @@ def download_file(self, path, job_id, prompts=None):
         raise
 
 
+@app.task(name="tasks.http_call")
+def http_call(payload, url, method="POST", headers=None, timeout=60, file_field=None,
+              file_path_key="file_path", service=None, body=None, merge=False, save=None):
+    """Generic service call backing `driver: "http"` workflow nodes.
+
+    The predecessor result arrives positionally as `payload`. With
+    `file_field` set, the file at `payload[file_path_key]` is uploaded as
+    multipart/form-data; otherwise the payload is sent as a JSON body with
+    the optional static `body` dict merged on top (e.g. to pin a per-node
+    `job_type`).
+    Failures raise, so a failed node aborts the chain.
+
+    `save` persists the parsed response to disk as
+    `{basename(file_path)}_{save}.json` (e.g. "summarise_output"), and
+    `merge` returns `{**payload, **response}` so a later node in the chain
+    keeps `job_id`/`prompts`/`file_path` from the workflow context.
+    """
+    job_id = payload.get("job_id", "unknown_job")
+
+    if file_field:
+        local_path = payload.get(file_path_key)
+        if not local_path:
+            raise ValueError(
+                f"http_call: no '{file_path_key}' in payload to upload as '{file_field}'."
+            )
+        with open(local_path, "rb") as f:
+            response = requests.request(
+                method, url,
+                files={file_field: (os.path.basename(local_path), f)},
+                headers=headers or {}, timeout=timeout,
+            )
+    else:
+        request_body = {**payload, **(body or {})}
+        response = requests.request(
+            method, url, json=request_body, headers=headers or {}, timeout=timeout,
+        )
+    response.raise_for_status()
+
+    try:
+        result = response.json()
+    except ValueError:
+        return response.text
+
+    # TODO: remove this and encapsulate in task
+    saved_path = None
+    if save:
+        filename = f"{job_id}_{save}.json"
+        save_to_shared_disk(job_id, filename, result)
+        saved_path = os.path.join(shared_path, job_id, filename)
+
+    output = {**payload, **result} if merge else result
+    if save:
+        output["save_path"] = saved_path
+    return output
+
+
+def _task_script_path(script):
+    if not isinstance(script, str) or not script:
+        raise ValueError("python_call: 'script' must be a non-empty string.")
+    root = Path(python_script_root).resolve()
+    path = (root / script).resolve()
+    if not path.is_relative_to(root) or not path.is_file():
+        raise ValueError(f"python_call: script '{script}' is not inside {root}.")
+    return path
+
+@app.task(name="tasks.python_call")
+def python_call(payload, script, params=None, timeout=python_call_timeout, merge=False):
+    if not isinstance(payload, dict):
+        raise ValueError("python_call: payload must be a mapping.")
+    if params is not None and not isinstance(params, dict):
+        raise ValueError("python_call: params must be a mapping.")
+
+    path = _task_script_path(script)
+    request = {**payload, **(params or {})}
+    completed = subprocess.run(
+        [sys.executable, str(path)],
+        input=json.dumps(request),
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+        check=False,
+    )
+    if completed.stderr.strip():
+        print(f"[python_call] {script}: {completed.stderr.strip()}")
+    if completed.returncode != 0:
+        raise RuntimeError(
+            f"python_call: {script} exited with {completed.returncode}: {completed.stderr.strip()}"
+        )
+
+    try:
+        result = json.loads(completed.stdout)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"python_call: {script} did not return JSON.") from exc
+
+    if merge:
+        if not isinstance(result, dict):
+            raise ValueError("python_call: merge requires a JSON object result.")
+        return {**payload, **result}
+    return result
+
+
 @app.task(name="tasks.process_visual")
 def process_visual(payload):
-    # file_path: /app/tmp/{task_id}/{filename}
     file_path = os.path.normpath(payload["file_path"])
     job_id = payload["job_id"]
     file_name = os.path.basename(file_path)
     visual_result = None
 
-    ensure_ready("visualservice")
+    start_service("visualservice")
     try:
         api_key = ensure_api_key()
         if not api_key:
@@ -149,10 +257,10 @@ def process_visual(payload):
         visual_result = extract_flat_captions(response.text)
 
         file_name_no_ext = os.path.splitext(file_name)[0]
-        save_to_disk(job_id, f"{file_name_no_ext}_visual_output.json", visual_result)
+        save_to_shared_disk(job_id, f"{file_name_no_ext}_visual_output.json", visual_result)
         print(f"[Visual Worker] Success: {len(visual_result)} segments.")
     finally:
-        release("visualservice")
+        stop_service("visualservice")
 
     # pass visual chunks forward so process_audio can use them for chunk splitting
     return {**payload, "visual_result": visual_result}
@@ -171,7 +279,7 @@ def process_audio(payload):  # change filepath to dict inputs
     job_id = payload["job_id"]
     file_name = os.path.basename(file_path)
 
-    ensure_ready("audioservice")
+    start_service("audioservice")
     try:
         print(f"[Audio Worker] Starting Task: {file_path}")
 
@@ -207,9 +315,9 @@ def process_audio(payload):  # change filepath to dict inputs
         print(f"[Audio Worker] Success: Received {len(outputs)} items.")
 
         file_name_no_ext = os.path.splitext(file_name)[0]
-        save_to_disk(job_id, f"{file_name_no_ext}_audio_output.json", outputs)
+        save_to_shared_disk(job_id, f"{file_name_no_ext}_audio_output.json", outputs)
     finally:
-        release("audioservice")
+        stop_service("audioservice")
 
     return {
         **payload,
@@ -219,10 +327,6 @@ def process_audio(payload):  # change filepath to dict inputs
         "output": outputs,
         "error": None,
     }
-
-
-
-
 
 @app.task(name="tasks.finalize_results")
 def finalize_results(job_id, job_type="full", callback_url=None, expects=None):
@@ -241,18 +345,28 @@ def finalize_results(job_id, job_type="full", callback_url=None, expects=None):
     """
 
     workspace = os.path.join(shared_path, job_id)
-
+    gemma_labels = ("visual", "audio", "transcript")
     audio_files = glob.glob(os.path.join(workspace, "*_audio_output.json"))
     visual_files = glob.glob(os.path.join(workspace, "*_visual_output.json"))
     summarise_files = glob.glob(os.path.join(workspace, "*_summarise_output.json"))
     extent_files = glob.glob(os.path.join(workspace, "*_extent_output.json"))
     tagging_files = glob.glob(os.path.join(workspace, "*_tagging_output.json"))
+    gemma_files = {
+        label: glob.glob(os.path.join(workspace, f"*_gemma_{label}_output.json"))
+        for label in gemma_labels
+    }
 
     audio_data = load_json_file(audio_files[0]) if audio_files else None
     visual_data = load_json_file(visual_files[0]) if visual_files else None
     summarise_data = load_json_file(summarise_files[0]) if summarise_files else None
     extent_data = load_json_file(extent_files[0]) if extent_files else None
     tagging_data = load_json_file(tagging_files[0]) if tagging_files else None
+
+    gemma_data = {
+        label: load_json_file(files[0])
+        for label, files in gemma_files.items()
+        if files
+    }
 
     if audio_files:
         file_name = os.path.basename(audio_files[0]).replace("_audio_output.json", "")
@@ -264,6 +378,12 @@ def finalize_results(job_id, job_type="full", callback_url=None, expects=None):
         file_name = os.path.basename(extent_files[0]).replace("_extent_output.json", "")
     elif tagging_files:
         file_name = os.path.basename(tagging_files[0]).replace("_tagging_output.json", "")
+    elif gemma_files["visual"]:
+        file_name = os.path.basename(gemma_files["visual"][0]).replace("_gemma_visual_output.json", "")
+    elif gemma_files["audio"]:
+        file_name = os.path.basename(gemma_files["audio"][0]).replace("_gemma_audio_output.json", "")
+    elif gemma_files["transcript"]:
+        file_name = os.path.basename(gemma_files["transcript"][0]).replace("_gemma_transcript_output.json", "")
     else:
         file_name = None
 
@@ -273,6 +393,7 @@ def finalize_results(job_id, job_type="full", callback_url=None, expects=None):
         "summarise": summarise_data,
         "extent": extent_data,
         "tagging": tagging_data,
+        "gemma": gemma_data if len(gemma_data) == len(gemma_labels) else None,
     }
 
     if expects is None:
@@ -300,6 +421,7 @@ def finalize_results(job_id, job_type="full", callback_url=None, expects=None):
         f.write(f"Summarise Files: {summarise_files}\n")
         f.write(f"Extent Files: {extent_files}\n")
         f.write(f"Tagging Files: {tagging_files}\n")
+        f.write(f"Gemma Files: {gemma_files}\n")
         f.write(f"Expects: {expects}\n")
         f.write(f"Missing: {missing}\n")
         f.write(f"Status: {'Success' if job_success else 'Partial/Failed'}\n")
@@ -322,6 +444,7 @@ def finalize_results(job_id, job_type="full", callback_url=None, expects=None):
         "summarise_result": summarise_data,
         "extent_result": extent_data,
         "tagging_result": tagging_data,
+        "gemma_result": gemma_data,
         "status": "success" if job_success else "failed",
     }
 
@@ -330,7 +453,7 @@ def finalize_results(job_id, job_type="full", callback_url=None, expects=None):
             requests.post(callback_url, json=final_output, timeout=30)
             print(f"[Callback]: final_output sent to: {callback_url}")
         except Exception as e:
-            print(f"[Callback Warning] Failed to send callback: {str(e)}")
+            print(f"[Callback Warning] Failed to send callback: {e!s}")
 
     if not job_success:
         raise RuntimeError(
@@ -341,219 +464,43 @@ def finalize_results(job_id, job_type="full", callback_url=None, expects=None):
 
 
 
-def run_service_task(
-    payload: dict,
-    job_type: str,
-    service_name: str,
-    log_tag: str,
-    file_suffix: str,
-    result_key: str,
-    api_url: str,
-) -> dict:
-    """Helper function to execute script processing tasks with shared service
-
-    management, HTTP requesting, and output saving.
-    """
-    job_id = payload.get("job_id")
-    result_template = {
-        "type": job_type,
-        "success": False,
-        "output": None,
-        "error": None,
-    }
-
-    try:
-        ensure_ready(service_name)
-        print(f"{log_tag} Starting Task: {job_id}")
-
-        response = requests.post(
-            api_url,
-            json={
-                "job_id": job_id,
-                "job_type": job_type,
-                "prompts": payload.get("prompts"),
-            },
-            timeout=SCRIPT_REQUEST_TIMEOUT,
-        )
-        response.raise_for_status()
-
-        result = response.json()
-        result_template.update({"success": True, "output": result})
-
-        file_path = payload.get("file_path", "")
-        file_name_no_ext = os.path.splitext(os.path.basename(file_path))[0]
-        save_to_disk(job_id, f"{file_name_no_ext}_{file_suffix}.json", result)
-        print(f"{log_tag} Success.")
-
-    except Exception as e:
-        print(f"{log_tag} Error: {str(e)}")
-        result_template["error"] = str(e)
-    finally:
-        release(service_name)
-
-    return {**payload, result_key: result_template}
-
-
-@app.task(name="tasks.process_summarise")
-def process_summarise(payload):
-    return run_service_task(
-        payload=payload,
-        job_type="summary",
-        service_name="transcriptservice",
-        log_tag="[Summarise Worker]",
-        file_suffix="summarise_output",
-        result_key="summarise_result",
-        api_url=transcript_api_url
-    )
-
-
-@app.task(name="tasks.process_tags")
-def process_tags(payload):
-    return run_service_task(
-        payload=payload,
-        job_type="tagging",
-        service_name="transcriptservice",
-        log_tag="[Tagging Worker]",
-        file_suffix="tagging_output",
-        result_key="tagging_result",
-        api_url=transcript_api_url
-    )
-
-
-@app.task(name="tasks.speaker_extent")
-def speaker_extent(payload):
-    file_path = os.path.normpath(payload["file_path"])
+@app.task(name="tasks.process_gemma")
+def process_gemma(payload):
+    """Run Gemma analysis against the downloaded job video."""
+    file_path = os.path.normpath(payload.get("gemma_file_path") or payload["file_path"])
     job_id = payload["job_id"]
+    file_name = os.path.basename(payload["file_path"])
+    file_name_no_ext = os.path.splitext(file_name)[0]
+    report_progress(job_id, "gemma", "Running Gemma analysis")
+    container_file_path = file_path.replace("/app/tmp/", "/workspace/AI4ME_TOOL/shared/", 1)
+    container_output_path = os.path.join(
+        "/workspace/AI4ME_TOOL/shared", job_id, file_name_no_ext
+    )
 
-    transcript: dict | None = load_json_file(file_path)
-    if not transcript:
-        raise ValueError("Failed to load transcript")
-
-    segments = transcript.get("segments", [])
-    if not segments:
-        raise ValueError("No segments found in transcript")
-
-    start_speaker_ms = get_speaker_turn_boundary_ms(segments, 0, "forward")
-    end_speaker_ms = get_speaker_turn_boundary_ms(segments, len(segments) - 1, "backward")
-
-    if start_speaker_ms > end_speaker_ms:
-        start_speaker_ms = segments[0]["startMs"]
-        end_speaker_ms = segments[len(segments) - 1]["endMs"]
-
-    transcript["segments"] = [
-        seg
-        for seg in segments
-        if seg["endMs"] > start_speaker_ms and seg["startMs"] < end_speaker_ms
+    command = [
+        "python",
+        "analyze_with_gemma.py",
+        container_file_path,
+        "--shot-detection",
+        "detect",
+        "--output",
+        container_output_path,
     ]
 
-    file_name = os.path.basename(file_path)
-    file_name_no_ext = os.path.splitext(file_name)[0]
-    trimmed_file_name = f"{file_name_no_ext}_trimmed.json"
-    save_to_disk(job_id, trimmed_file_name, transcript)
-
-    extent_result = {"start": start_speaker_ms, "end": end_speaker_ms}
-    save_to_disk(job_id, f"{file_name_no_ext}_extent_output.json", extent_result)
-
-    trimmed_file_path = os.path.join(os.path.dirname(file_path), trimmed_file_name)
-    print(f"[Speaker Extent] Trimmed to speaker range: {start_speaker_ms}ms - {end_speaker_ms}ms")
-    return {
-        **payload,
-        "file_path": trimmed_file_path,
-        "start": start_speaker_ms,
-        "end": end_speaker_ms,
-    }
-
-
-@app.task(name="tasks.segment_extent")
-def segment_extent(payload):
-    file_path = os.path.normpath(payload["file_path"])
-    job_id = payload["job_id"]
-
-    transcript = load_json_file(file_path)
-
-    segments = transcript.get("segments", [])
-    first = segments[0]
-    last = segments[len(segments) - 1]
-    start_ms = first.get("startMs", 0)
-    end_ms = last.get("endMs", 0) 
-
-    if start_ms > end_ms:
-        start_ms = end_ms
-
-    file_name = os.path.basename(file_path)
-    file_name_no_ext = os.path.splitext(file_name)[0]
-
-    extent_result = {"start": start_ms, "end": end_ms}
-    save_to_disk(job_id, f"{file_name_no_ext}_extent_output.json", extent_result)
-
-    print(f"[Segment Extent] Extracted range: {start_ms}ms - {end_ms}ms")
-    return {**payload, "start": start_ms, "end": end_ms}
-
-
-@app.task(name="tasks.transcript_to_text")
-def transcript_to_text(payload):
-    file_path = os.path.normpath(payload["file_path"])
-    job_id = payload["job_id"]
-
-    transcript = load_json_file(file_path)
-    segments = transcript.get("segments", [])
-
-    text = " ".join(
-        seg.get("text", "").strip() 
-        for seg in segments 
-        if seg.get("text", "").strip()
-    )
-
-    save_to_disk(job_id, transcript_text_file, text)
-
-    txt_path = os.path.join(os.path.dirname(file_path), transcript_text_file)
-    print(f"[Transcript to Text] Saved text to {txt_path}")
-    return {**payload, "file_path": txt_path}
-
-
-@app.task(name="tasks.execute_workflow", bind=True)
-def execute_workflow(self, workflow_path, job_id, path, prompts=None, job_type="full", callback_url=None):
-    """Entry point for DAG-based jobs: parses a workflow JSON template into
-    a DAG and runs it as a single Celery job, feeding this request's
-    `path`/`prompts` into the DAG as runtime input (job_inputs) rather than
-    baking them into the template.
-    """
-    parser = Parser(workflow_path)
-    engine = DAGEngine(
-        parser.dag,
-        job_id=job_id,
-        job_type=job_type,
-        callback_url=callback_url,
-        job_inputs={"path": path, "prompts": prompts},
-        on_failure=parser.settings.get("on_failure", "stop"),
-        # Node-level retry. Celery's @app.task(autoretry_for=...) never engages
-        # on the DAG path because the python driver calls a task's function
-        # directly rather than dispatching it — and a Celery-level retry of
-        # execute_workflow would re-run the whole DAG rather than the one
-        # node that failed.
-        retries=parser.settings.get("retries", 0),
-        retry_backoff=parser.settings.get("retry_backoff", 1.0),
-        retry_backoff_max=parser.settings.get("retry_backoff_max", 60.0),
-    )
-    # Sequential by default. execute_parallel() is safe as far as service
-    # occupancy goes -- dag/readiness.py leases refcount holders and cap
-    # concurrency per service -- but running two *different* GPU services
-    # concurrently also needs their combined VRAM to actually fit the host,
-    # which a lease alone doesn't check. A workflow opts in per-template via
-    # `settings.parallel: true` once its nodes' GPU footprints are known to
-    # coexist (e.g. pinned to separate devices).
-    if parser.settings.get("parallel", False):
-        engine.execute_parallel()
-    else:
-        engine.execute()
-
-    # Per-node envelopes go to the workspace rather than into the task
-    # result, so /status returns the one /status contract (the terminal
-    # node's merged output) without losing the node-level detail that makes
-    # a failed run diagnosable.
     try:
-        save_to_disk(job_id, "dag_run.json", engine.run_summary())
+        print(f"[Gemma Worker] Starting Task: {file_path}")
+        if not os.path.exists(file_path):
+            raise FileNotFoundError(f"Physical file check failed: {file_path}")
+        _compose("gemma", command)
+        print(f"[Gemma Worker] Success: {file_name}")
+        return {**payload, "gemma_result": {"success": True, "video_name": file_name}}
     except Exception as e:
-        print(f"[DAG] Could not write dag_run.json: {e}")
-
-    return engine.terminal_result()
+        print(f"[Gemma Worker] Error: {str(e)}")
+        return {
+            **payload,
+            "gemma_result": {
+                "success": False,
+                "video_name": file_name,
+                "error": str(e),
+            },
+        }

@@ -11,3 +11,6 @@ soundfile
 torchvision
 json-repair
 scenedetect[opencv]
+fastapi==0.111.*
+uvicorn[standard]==0.30.*
+pydantic==2.*

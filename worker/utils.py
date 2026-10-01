@@ -1,27 +1,39 @@
-import os
-import time
-import requests
-import xmltodict
 import json
+import os
 import subprocess
+import time
+
 import docker
 import docker.errors
-
+import requests
+import xmltodict
 from consts import (
+    HEALTH_CHECK_INTERVAL,
+    HEALTH_CHECK_TIMEOUT,
+    SERVICE_CONTAINER_NAMES,
+    api_key_path,
     compose_file,
     project_dir,
     service_modes_path,
-    SERVICE_CONTAINER_NAMES,
-    HEALTH_CHECK_TIMEOUT,
-    HEALTH_CHECK_INTERVAL,
-    api_key_path,
     shared_path,
-    visual_api_url,
     visual_api_admin_key,
+    visual_api_url,
 )
 
+_docker_client = None
 
-docker_client = docker.from_env()
+
+def _client():
+    """Lazily-bound Docker client.
+
+    Constructed on first use rather than at import so a worker can boot (and
+    run non-service tasks) on a node without a reachable Docker socket; the
+    connection is only needed when the worker actually manages a container.
+    """
+    global _docker_client
+    if _docker_client is None:
+        _docker_client = docker.from_env()
+    return _docker_client
 
 
 def _container_name(service_name):
@@ -53,16 +65,26 @@ def _compose(service_name, *args):
     subprocess.run(cmd, check=True)
 
 
+def _service_healthy(service_name):
+    """True when this node's container for the service reports healthy.
+
+    Reuse over restart: whether a service is keepalive-resident or still
+    warm from the previous job in a sequential chain, an already-healthy
+    container is just used as-is.
+    """
+    try:
+        container = _client().containers.get(_container_name(service_name))
+        container.reload()
+        return container.attrs.get("State", {}).get("Health", {}).get("Status") == "healthy"
+    except docker.errors.NotFound:
+        return False
+
+
 def start_service(service_name, max_retries=1):
+    if _service_healthy(service_name):
+        return
+
     if service_modes.get(service_name) == "keepalive":
-        try:
-            container = docker_client.containers.get(_container_name(service_name))
-            container.reload()
-            health = container.attrs.get("State", {}).get("Health", {}).get("Status")
-            if health == "healthy":
-                return
-        except docker.errors.NotFound:
-            pass
         print(f"[Service Manager] {service_name} is in keepalive mode but not healthy; falling back to cold-start recovery.")
 
     for attempt in range(max_retries + 1):
@@ -74,10 +96,7 @@ def start_service(service_name, max_retries=1):
         # health check
         elapsed = 0
         while elapsed < HEALTH_CHECK_TIMEOUT:
-            container = docker_client.containers.get(_container_name(service_name))
-            container.reload()
-            health = container.attrs.get("State", {}).get("Health", {}).get("Status")
-            if health == "healthy":
+            if _service_healthy(service_name):
                 return
             time.sleep(HEALTH_CHECK_INTERVAL)
             elapsed += HEALTH_CHECK_INTERVAL
@@ -104,7 +123,7 @@ def stop_service(service_name):
 
 
 # --- Support functions ---
-def save_to_disk(job_id, filename, data):
+def save_to_shared_disk(job_id, filename, data):
     output_dir = os.path.join(shared_path, job_id)
     os.makedirs(output_dir, exist_ok=True)
     with open(os.path.join(output_dir, filename), "w", encoding="utf-8") as f:
@@ -183,15 +202,6 @@ def extract_flat_captions(xml_body):
         for seg in raw_segments
     ]
 
-def get_speaker_turn_boundary_ms(segments: list[dict], index: int, search_direction: str) -> int:
-    speaker = segments[index]["speaker"]
-    step = 1 if search_direction == "forward" else -1
-    i = index
-
-    while 0 <= i + step < len(segments) and segments[i + step]["speaker"] == speaker:
-        i += step
-
-    return segments[i]["endMs"] if search_direction == "forward" else segments[i]["startMs"]
 
 def load_json_file(file_path) -> dict | None:
     try:
