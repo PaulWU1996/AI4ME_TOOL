@@ -25,30 +25,46 @@
     },
     {
       "id": "extent",
-      "task": "segment_extent",
+      "driver": "python",
+      "script": "audio-transcription/segment_extent.py",
+      "merge": true,
       "depends_on": [
         "download"
       ]
     },
     {
       "id": "transcript",
-      "task": "transcript_to_text",
+      "driver": "python",
+      "script": "audio-transcription/transcript_to_text.py",
+      "merge": true,
       "depends_on": [
         "extent"
       ]
     },
     {
       "id": "summarise",
-      "task": "process_summarise",
-      "service": "transcriptservice",
+      "driver": "http",
+      "url": "http://transcriptservice:8000/process",
+      "body": {
+        "job_type": "summary"
+      },
+      "merge": true,
+      "save": "summarise_output",
+      "timeout": 1800,
       "depends_on": [
         "transcript"
       ]
     },
     {
       "id": "tagging",
-      "task": "process_tags",
-      "service": "transcriptservice",
+      "driver": "http",
+      "url": "http://transcriptservice:8000/process",
+      "body": {
+        "job_type": "tagging"
+      },
+      "merge": true,
+      "save": "tagging_output",
+      "timeout": 1800,
       "depends_on": [
         "summarise"
       ]

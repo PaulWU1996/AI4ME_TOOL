@@ -1,7 +1,7 @@
 {
   "workflow": {
-    "name": "summarise",
-    "version": "1.0"
+    "name": "speaker-extent-summarise",
+    "version": "1.1"
   },
   "settings": {
     "on_failure": "stop",
@@ -24,12 +24,31 @@
       "retries": 3
     },
     {
-      "id": "transcript",
-      "driver": "python",
-      "script": "audio-transcription/transcript_to_text.py",
+      "id": "extent",
+      "driver": "http",
+      "url": "http://audiotranscriptionservice:8000/process",
+      "body": {
+        "job_type": "speaker_extent"
+      },
+      "timeout": 300,
+      "service": "audiotranscriptionservice",
       "merge": true,
       "depends_on": [
         "download"
+      ]
+    },
+    {
+      "id": "transcript",
+      "driver": "http",
+      "url": "http://audiotranscriptionservice:8000/process",
+      "body": {
+        "job_type": "transcript_to_text"
+      },
+      "timeout": 300,
+      "service": "audiotranscriptionservice",
+      "merge": true,
+      "depends_on": [
+        "extent"
       ]
     },
     {
@@ -74,11 +93,13 @@
       "terminal": true,
       "kwargs": {
         "expects": [
+          "extent",
           "summarise",
           "tagging"
         ]
       },
       "depends_on": [
+        "extent",
         "summarise",
         "tagging"
       ]

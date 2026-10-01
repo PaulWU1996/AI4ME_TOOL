@@ -2,23 +2,25 @@ import json
 import os
 
 from fastapi import Body, FastAPI, HTTPException
-from celery import uuid, signature
+from celery import uuid
 from celery.result import AsyncResult
 from tasks import app as celery_app
 from pydantic import BaseModel
 from typing import Optional
 from datetime import datetime, timezone
 
+from dag.compose import build_canvas, build_task_map
 from dag.parser import Parser
 
 app = FastAPI()
 
 MAX_ETA_SECONDS = 3600  # set to visibility_timeout value
 
-# All jobs dispatch through registered DAG workflows (tasks.execute_workflow).
-# WORKFLOWS_PATH is a volume shared between the controller and worker
-# containers; registry.json maps a workflow's own `workflow.name` to its
-# file, and is updated by POST /workflows.
+# All jobs dispatch through registered DAG workflows, translated by
+# dag/compose.py into a Celery chain-of-groups canvas. WORKFLOWS_PATH is a
+# volume shared between the controller and worker containers; registry.json
+# maps a workflow's own `workflow.name` to its file, and is updated by
+# POST /workflows.
 WORKFLOWS_PATH = os.getenv("WORKFLOWS_PATH", "/app/workflows")
 REGISTRY_PATH = os.path.join(WORKFLOWS_PATH, "registry.json")
 
@@ -38,30 +40,33 @@ def save_registry(registry: dict):
 
 class ProcessRequest(BaseModel):
     path: str
-    callback_url: Optional[str] = None
-    prompts: Optional[str] = None
+    callback_url: str | None = None
+    prompts: str | None = None
     job_type: str = "full"
-    version: Optional[str] = None  # pin a specific registered workflow version; defaults to latest
-    run_at_ms: Optional[int] = None
+    version: str | None = None  # pin a specific registered workflow version; defaults to latest
+    run_at_ms: int | None = None
 
 
-def build_dag_workflow(request: ProcessRequest, job_id: str, workflow_path: str):
-    return signature(
-        "tasks.execute_workflow",
-        kwargs={
-            "workflow_path": workflow_path,
-            "job_id": job_id,
-            "path": request.path,
-            "prompts": request.prompts,
-            "job_type": request.job_type,
-            "callback_url": request.callback_url,
-        },
-        immutable=True,
-    ).set(task_id=job_id)
+def build_workflow_canvas(request: ProcessRequest, job_id: str, workflow_path: str):
+    """Translate a registered workflow template into a Celery canvas.
+
+    The workflow's `path`/`prompts` and this request's job metadata are fed
+    into the canvas as per-job context (like the old `job_inputs`), rather
+    than being baked into the reusable template.
+    """
+    parser = Parser(workflow_path)
+    job_context = {
+        "path": request.path,
+        "prompts": request.prompts,
+        "job_id": job_id,
+        "job_type": request.job_type,
+        "callback_url": request.callback_url,
+    }
+    return build_canvas(parser.dag, build_task_map(parser, job_context))
 
 
 @app.post("/workflows")
-async def register_workflow(workflow: dict = Body(...)):
+async def register_workflow():
     """Validate and permanently register a DAG workflow template version, so
     it can be referenced as a `job_type` (optionally pinned to a `version`)
     in POST /process afterwards.
@@ -70,6 +75,7 @@ async def register_workflow(workflow: dict = Body(...)):
     was registered most recently and is what /process uses when a request
     doesn't pin a specific version.
     """
+    workflow: dict = Body(...)
     meta = workflow.get("workflow") or {}
     name = meta.get("name")
     version = meta.get("version")
@@ -157,7 +163,9 @@ async def start_pipeline(request: ProcessRequest):
             async_kwargs["eta"] = eta_dt
 
     try:
-        build_dag_workflow(request, job_id, workflow_entry["path"]).apply_async(**async_kwargs)
+        build_workflow_canvas(request, job_id, workflow_entry["path"]).apply_async(
+            task_id=job_id, **async_kwargs
+        )
         return {"status": "submitted", "job_id": job_id, "job_type": request.job_type}
 
     except Exception as e:

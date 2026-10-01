@@ -5,7 +5,6 @@
     "ram_mb": 4000,
     "gpu": true,
     "supports_keepalive": true,
-    "concurrency": 1,
     "_measured_vram_mb": 18281
   },
   "visualservice": {
@@ -14,7 +13,6 @@
     "ram_mb": 4000,
     "gpu": true,
     "supports_keepalive": true,
-    "concurrency": 1,
     "_measured_vram_mb": 3890
   },
   "transcriptservice": {
@@ -22,7 +20,6 @@
     "vram_mb": 0,
     "ram_mb": 2000,
     "gpu": false,
-    "supports_keepalive": true,
-    "concurrency": 1
+    "supports_keepalive": true
   }
 }

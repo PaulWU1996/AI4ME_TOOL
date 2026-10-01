@@ -25,15 +25,23 @@
     },
     {
       "id": "transcript",
-      "task": "transcript_to_text",
+      "driver": "python",
+      "script": "audio-transcription/transcript_to_text.py",
+      "merge": true,
       "depends_on": [
         "download"
       ]
     },
     {
       "id": "tagging",
-      "task": "process_tags",
-      "service": "transcriptservice",
+      "driver": "http",
+      "url": "http://transcriptservice:8000/process",
+      "body": {
+        "job_type": "tagging"
+      },
+      "merge": true,
+      "save": "tagging_output",
+      "timeout": 1800,
       "depends_on": [
         "transcript"
       ]
