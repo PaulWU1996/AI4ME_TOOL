@@ -1,7 +1,7 @@
 {
   "workflow": {
     "name": "speaker-extent-summarise",
-    "version": "1.0"
+    "version": "1.1"
   },
   "settings": {
     "on_failure": "stop",
@@ -25,8 +25,12 @@
     },
     {
       "id": "extent",
-      "driver": "python",
-      "script": "audio-transcription/speaker_extent.py",
+      "driver": "http",
+      "url": "http://transcriptservice:8000/process",
+      "body": {
+        "job_type": "speaker_extent"
+      },
+      "timeout": 300,
       "merge": true,
       "depends_on": [
         "download"
@@ -34,8 +38,12 @@
     },
     {
       "id": "transcript",
-      "driver": "python",
-      "script": "audio-transcription/transcript_to_text.py",
+      "driver": "http",
+      "url": "http://transcriptservice:8000/process",
+      "body": {
+        "job_type": "transcript_to_text"
+      },
+      "timeout": 300,
       "merge": true,
       "depends_on": [
         "extent"
@@ -44,7 +52,7 @@
     {
       "id": "summarise",
       "driver": "http",
-      "url": "http://transcriptservice:8000/process",
+      "url": "http://llmtoolsservice:8000/process",
       "body": {
         "job_type": "summary"
       },
@@ -59,7 +67,7 @@
     {
       "id": "tagging",
       "driver": "http",
-      "url": "http://transcriptservice:8000/process",
+      "url": "http://llmtoolsservice:8000/process",
       "body": {
         "job_type": "tagging"
       },

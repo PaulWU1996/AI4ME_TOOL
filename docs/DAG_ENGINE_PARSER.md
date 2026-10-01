@@ -47,7 +47,7 @@ the DAG runtime now.
   - A node declaring `driver: "python"` collapses to the generic
     `tasks.python_call` task. The node names a script below the worker's
      `/app/services` root, so a node names its module (e.g.
-     `audio-transcription/transcript_to_text.py`); the predecessor's result arrives
+     `transcript-tools/transcript_to_text.py`); the predecessor's result arrives
      positionally
     as JSON on stdin, and the script must return one JSON document on
     stdout. `params` overrides payload keys before the script runs, `timeout`

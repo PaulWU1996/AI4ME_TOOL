@@ -15,8 +15,8 @@
     "supports_keepalive": true,
     "_measured_vram_mb": 3890
   },
-  "transcriptservice": {
-    "compose_service": "transcriptservice",
+  "llmtoolsservice": {
+    "compose_service": "llmtoolsservice",
     "vram_mb": 0,
     "ram_mb": 2000,
     "gpu": false,

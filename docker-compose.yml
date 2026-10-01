@@ -161,12 +161,11 @@ services:
       retries: 3
       start_period: 5m
   
-  # TODO: Rename - llmservice (might require some internal name changes for clarity) 
-  transcriptservice:
+  llmtoolsservice:
     profiles: ["on-demand", "llm", "transcription" ]
     build: services/llm-tools
     image: ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/ai4me/summarise:summarise
-    container_name: transcriptservice
+    container_name: llmtoolsservice
     ports:
       - "9003:8000"
     volumes:
@@ -177,7 +176,6 @@ services:
       - SHARED_VOLUME_PATH=/shared
       - UVICORN_WORKERS=1
       - UVICORN_LOG_LEVEL=info
-      - MAX_TRANSCRIPT_CHARS=0
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
       interval: 30s
@@ -195,11 +193,10 @@ services:
               count: all
               capabilities: [ gpu ]
 
-  # TODO: Rename transcriptservice
-  audiotranscriptionservice:
+  transcriptservice:
     profiles: [ "on-demand", "transcription"]
-    build: services/audio-transcription
-    container_name: audiotranscriptionservice
+    build: services/transcript-tools
+    container_name: transcriptservice
     ports:
       - "9005:8000"
     volumes:

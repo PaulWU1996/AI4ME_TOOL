@@ -1,4 +1,4 @@
-"""HTTP API over the audio-transcription scripts.
+"""HTTP API over the transcript-tools scripts.
 
 The scripts in this directory are `driver: "python"` nodes today: the worker
 runs one as a subprocess with the predecessor payload on stdin and expects a

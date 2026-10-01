@@ -84,8 +84,8 @@ def download_file(self, path, job_id, prompts=None):
         print(f"[Downloader] File ready at {dest}")
         return {
             "file_path": dest,
+            "file_name": filename,
             "video_path": f"{job_id}/{filename}", # update down stream services to use file path instead
-            # workspace root travels with the payload for use downstream.
             "shared_path": shared_path,
             "job_id": job_id,
             "prompts": prompts,
