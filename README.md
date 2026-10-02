@@ -86,7 +86,7 @@ docker load -i narrative-api.tar
 3. Load the Docker image for the transcript service:
 
 ```bash
-docker load -i transcriptservice.tar
+docker load -i llmtoolsservice.tar
 ```
 
 4. Start the entire stack using the resource-aware start script:
@@ -95,7 +95,7 @@ docker load -i transcriptservice.tar
 ./scripts/start.sh
 
 # Keep specific GPU services resident across jobs (see "Service Modes" below)
-./scripts/start.sh --keepalive audioservice,transcriptservice
+./scripts/start.sh --keepalive audioservice,llmtoolsservice
 ```
 There will be several services starting up, including Redis, the Controller API, and the Worker. Services not selected with `--keepalive` start on-demand when a job requires them and stop afterward. The Controller and Worker will connect to Redis for task orchestration.
 
@@ -109,13 +109,13 @@ http://localhost:9000
 
 ### Service Modes: Cold-start vs Keepalive
 
-By default, `audioservice`, `visualservice`, and `transcriptservice` are **cold-started**: the worker starts each container only when a job needs it and stops it again once the job finishes. This keeps host resource usage minimal but pays a model-load/health-check cost (up to ~5.5 minutes) on every single job.
+By default, `audioservice`, `visualservice`, and `llmtoolsservice` are **cold-started**: the worker starts each container only when a job needs it and stops it again once the job finishes. This keeps host resource usage minimal but pays a model-load/health-check cost (up to ~5.5 minutes) on every single job.
 
 If your host has enough spare GPU/RAM capacity, you can instead keep one or more of these services **resident** across jobs ("keepalive"), avoiding the per-job startup cost.
 
 ```bash
-# Keep audioservice and transcriptservice running; visualservice still cold-starts per job
-./scripts/start.sh --keepalive audioservice,transcriptservice
+# Keep audioservice and llmtoolsservice running; visualservice still cold-starts per job
+./scripts/start.sh --keepalive audioservice,llmtoolsservice
 ```
 
 How it works (`scripts/start_services.py`, invoked by `scripts/start.sh`):
@@ -223,7 +223,7 @@ A workflow template declares its nodes with `id`, `task` (a function in `worker/
 | `requires: [...]` | For `call: "kwargs"` nodes — keys that must resolve at pre-flight, or the job fails fast. |
 | `terminal: true` | The node whose output is the job's `/status` result (a workflow's summary/finalize step). |
 | `service` / `retries` | On-demand service this node's worker starts/stops around the node (per-worker lifecycle manager in `worker/utils.py`); node-level retry count (honored on `download_file` by its task-level `autoretry_for`). |
-| `driver: "python"` | Runs a script from `services/`. The script receives the predecessor payload as JSON on stdin and returns one JSON document on stdout. `script` is relative to `/app/services`, so a node names its module (`audio-transcription/transcript_to_text.py`); `params` are static input overrides, `timeout` is in seconds, and `merge` preserves the payload for the next node. |
+| `driver: "python"` | Runs a script from `services/`. The script receives the predecessor payload as JSON on stdin and returns one JSON document on stdout. `script` is relative to `/app/services`, so a node names its module (`transcript-tools/transcript_to_text.py`); `params` are static input overrides, `timeout` is in seconds, and `merge` preserves the payload for the next node. |
 
 Python scripts run inside the worker, so workflow registration must stay a trusted, internal operation. The worker has host mounts and Docker socket access; do not expose `POST /workflows` to untrusted callers.
 
@@ -233,7 +233,7 @@ For example, a transcript step can be written as:
 
 ```json
 { "id": "transcript", "driver": "python",
-  "script": "audio-transcription/transcript_to_text.py", "merge": true,
+  "script": "transcript-tools/transcript_to_text.py", "merge": true,
   "depends_on": ["download"] }
 ```
 

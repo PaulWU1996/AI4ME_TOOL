@@ -18,15 +18,13 @@ def _shared_path() -> Path:
     return Path(os.environ.get("SHARED_VOLUME_PATH", "/shared"))
 
 
-def _max_chars() -> int:
-    return int(os.environ.get("MAX_TRANSCRIPT_CHARS", 0))
-
-
 class ProcessRequest(BaseModel):
     job_id: str
     job_type: Literal["summary", "tagging"] = "summary"
+    file_name: str
     prompts: Optional[str] = None
     language: str = "en"
+
 
 class SummaryResponse(BaseModel):
     job_id: str
@@ -34,6 +32,7 @@ class SummaryResponse(BaseModel):
     summary: str
     model: str
     processing_time_ms: int
+
 
 class TaggingResponse(BaseModel):
     job_id: str
@@ -62,9 +61,13 @@ def validate_result(job_type: str, result: dict) -> dict:
 
 
 @router.post("/process", response_model=SummaryResponse | TaggingResponse)
-async def process_transcript(req: ProcessRequest):
+async def process_text(req: ProcessRequest):
     logger.info(
-        "job received | job_id=%s job_type=%s language=%s", req.job_id, req.job_type, req.language
+        "job received | file_name=%s job_id=%s job_type=%s language=%s",
+        req.file_name,
+        req.job_id,
+        req.job_type,
+        req.language,
     )
 
     if req.job_type not in JOB_TYPES:
@@ -74,35 +77,22 @@ async def process_transcript(req: ProcessRequest):
             detail=f"job_type '{req.job_type}' is not handled by this service",
         )
 
-    transcript_path = _shared_path() / req.job_id / "transcript.txt"
+    text_path = _shared_path() / req.job_id / req.file_name
 
-    if not transcript_path.exists():
-        logger.warning("transcript not found | job_id=%s path=%s", req.job_id, transcript_path)
+    if not text_path.exists():
+        logger.warning("text not found | job_id=%s path=%s", req.job_id, text_path)
         raise HTTPException(
             status_code=404,
-            detail=f"transcript not found for job {req.job_id}",
+            detail=f"text not found for job {req.job_id}",
         )
 
-    transcript = transcript_path.read_text(encoding="utf-8").strip()
+    text = text_path.read_text(encoding="utf-8").strip()
 
-    if not transcript:
-        logger.warning("transcript is empty | job_id=%s", req.job_id)
-        raise HTTPException(status_code=422, detail="transcript.txt is empty")
+    if not text:
+        logger.warning("text is empty | job_id=%s", req.job_id)
+        raise HTTPException(status_code=422, detail=f"{req.file_name} is empty")
 
-    max_chars = _max_chars()
-    if max_chars and len(transcript) > max_chars:
-        logger.warning(
-            "transcript too long | job_id=%s chars=%d limit=%d",
-            req.job_id,
-            len(transcript),
-            max_chars,
-        )
-        raise HTTPException(
-            status_code=413,
-            detail=f"transcript exceeds {max_chars} characters",
-        )
-
-    logger.info("transcript read | job_id=%s chars=%d", req.job_id, len(transcript))
+    logger.info("text read | job_id=%s chars=%d", req.job_id, len(text))
 
     if not await ollama_client.is_ready():
         logger.error("ollama unavailable | job_id=%s", req.job_id)
@@ -113,7 +103,9 @@ async def process_transcript(req: ProcessRequest):
     prompts_dir, response_cls = JOB_TYPES[req.job_type]
 
     try:
-        result = await ollama_client.generate(transcript, req.language, custom_prompt=req.prompts, prompts_dir=prompts_dir)
+        result = await ollama_client.generate(
+            text, req.language, custom_prompt=req.prompts, prompts_dir=prompts_dir
+        )
         validated = validate_result(req.job_type, result)
     except ValueError as exc:
         logger.error("ollama parse error | job_id=%s error=%s", req.job_id, exc)

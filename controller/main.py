@@ -1,16 +1,14 @@
 import json
 import os
-
-from fastapi import Body, FastAPI, HTTPException
-from celery import uuid
-from celery.result import AsyncResult
-from tasks import app as celery_app
-from pydantic import BaseModel
-from typing import Optional
 from datetime import datetime, timezone
 
+from celery import uuid
+from celery.result import AsyncResult
 from dag.compose import build_canvas, build_task_map
 from dag.parser import Parser
+from fastapi import Body, FastAPI, HTTPException
+from pydantic import BaseModel
+from tasks import app as celery_app
 
 app = FastAPI()
 

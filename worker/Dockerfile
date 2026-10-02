@@ -27,6 +27,6 @@ COPY worker/ .
 COPY dag/ ./dag
 
 # add another other services referenced in your workflows here.
-COPY services/audio-transcription/ ./services/audio-transcription/
+COPY services/transcript-tools/ ./services/transcript-tools/
 
 CMD ["celery", "-A", "tasks", "worker", "--loglevel=info", "--concurrency=1"]
