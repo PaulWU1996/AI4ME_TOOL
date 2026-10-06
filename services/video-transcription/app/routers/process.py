@@ -10,6 +10,7 @@ from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel
 
 from app.services import gemma_runner
+from app.stream_decoder import fetch_dash_stream
 
 logger = logging.getLogger(__name__)
 
@@ -26,14 +27,16 @@ def _shared_path() -> Path:
 
 class ProcessRequest(BaseModel):
     job_id: str
-    job_type: str = "gemma"
+    job_type: Literal["gemma", "gemma-dash"] = "gemma"
     video_path: str
-    prompts: Optional[str] = None
+    prompts: str | None = None
     language: str = "en"
-    clip_start: Optional[float] = None
-    clip_end: Optional[float] = None
-    shot_detection: Optional[Literal["detect", "test"]] = None
-
+    clip_start: float | None = None
+    clip_end: float | None = None
+    shot_detection: Literal["detect", "test"] | None = None
+    start_time_ms: int | None = None
+    look_ahead_ms: int | None = None
+    output_sr: int = 48_000
 
 class NarrativeSegment(BaseModel):
     start: str
@@ -55,10 +58,11 @@ class ModelsInfo(BaseModel):
 
 class ProcessResponse(BaseModel):
     job_id: str
-    job_type: str
-    narrative: List[NarrativeSegment]
-    audio_narrative: List[NarrativeSegment]
-    transcript: List[TranscriptSegment]
+    programme_id: str | None
+    job_type: Literal["gemma", "gemma-dash"]
+    narrative: list[NarrativeSegment]
+    audio_narrative: list[NarrativeSegment]
+    transcript: list[TranscriptSegment]
     audio_detected: bool
     video_duration_seconds: float
     models: ModelsInfo
@@ -69,8 +73,7 @@ def _resolve_video(job_id: str, video_path: str) -> Path:
     """Resolve `video_path` inside the job's shared directory, or explain why not.
 
     `video_path` is relative to the shared volume root and conventionally
-    `"{job_id}/{filename}"` — the same shape the orchestrator's audio service
-    receives. It must still land inside this job's directory, so one job can
+    `"{job_id}/{filename}"`. It must still land inside this job's directory, so one job can
     never reach another job's media.
     """
     if not video_path.strip():
@@ -125,6 +128,24 @@ async def process_video(req: ProcessRequest):
         req.video_path,
     )
 
+    if req.job_type not in ("gemma", "gemma-dash"):
+        logger.warning("rejected job_type | job_id=%s job_type=%s", req.job_id, req.job_type)
+        raise HTTPException(
+            status_code=422,
+            detail=f"job_type '{req.job_type}' is not handled by this service",
+        )
+
+    if req.job_type == "gemma-dash" and req.programme_id is None or req.start_time_ms is None or req.look_ahead_ms is None:
+        logger.warning("job_type requires additional input fields | job_id=%s job_type=%s", req.job_id, req.job_type)
+        raise HTTPException(
+            status_code=422,
+            detail=f"job_type '{req.job_type}' requires additional input fields.",
+        )
+        
+    if req.job_type == "gemma-dash":
+        # download the video from the provided URL and save it to the shared volume
+        fetch_dash_stream(req.programme_id, req.start_time_ms, req.look_ahead_ms, req.video_path, req.output_sr)
+        
     video_path = _resolve_video(req.job_id, req.video_path)
 
     if not gemma_runner.is_ready():

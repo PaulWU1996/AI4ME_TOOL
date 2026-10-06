@@ -14,3 +14,16 @@ scenedetect[opencv]
 fastapi==0.111.*
 uvicorn[standard]==0.30.*
 pydantic==2.*
+
+# for DASH stream decoder
+# HTTP requests handling - required
+requests>=2.31.0
+
+# FFmpeg bindings for media decoding - required
+av>=10.0.0
+
+# Numerical computing - required
+numpy>=1.21.0
+
+# XML parsing (optional but recommended for better performance)
+lxml>=4.9.0

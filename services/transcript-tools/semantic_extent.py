@@ -8,6 +8,7 @@ from transcript import get_transcript
 from utils import save_to_shared_disk
 
 MIN_CHUNKS_TO_TRIM = 3
+EMBEDDING_MODEL = "all-MiniLM-L6-v2"
 
 def get_semantic_range_ms(segments: list[dict]) -> tuple[int, int]:
     """The ms range between the first and last semantic chunk.
@@ -28,7 +29,7 @@ def get_semantic_range_ms(segments: list[dict]) -> tuple[int, int]:
         pos += len(ln) + 1  # +1 for "\n"
 
     chunker = SemanticChunker(
-        embedding_model="minishlab/potion-base-32M",
+        embedding_model=EMBEDDING_MODEL,
         threshold=0.9,
         chunk_size=1024,
         similarity_window=5,
