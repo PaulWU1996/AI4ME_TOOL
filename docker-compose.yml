@@ -29,7 +29,7 @@ services:
     build:
       context: .
       dockerfile: controller/Dockerfile
-    # image: ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPO}:controller
+    image: ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPO}:controller
     container_name: controller
     ports:
       - "9000:9000"
@@ -55,7 +55,7 @@ services:
     build:
       context: .
       dockerfile: worker/Dockerfile
-    # image: ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPO}:worker
+    image: ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPO}:worker
     container_name: worker
     volumes:
       - ./shared:/app/tmp
@@ -185,13 +185,13 @@ services:
     restart: no
     networks:
       - ai_network
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: all
-              capabilities: [ gpu ]
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: all
+    #           capabilities: [ gpu ]
 
   transcriptservice:
     profiles: [ "on-demand", "transcription"]
@@ -215,13 +215,13 @@ services:
       timeout: 10s
       retries: 3
       start_period: 10s
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: all
-              capabilities: [ gpu ]
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: all
+    #           capabilities: [ gpu ]
 
   gemma:
     build: ./services/video-transcription
