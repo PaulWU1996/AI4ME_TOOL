@@ -1,0 +1,24 @@
+{
+  "workflow": {
+    "name": "content-avoidance",
+    "version": "1.0"
+  },
+  "settings": {
+    "on_failure": "stop",
+    "retry_backoff": 1.0
+  },
+  "tasks": [
+    {
+      "id": "gemma-analysis",
+      "driver": "http",
+      "url": "http://gemma:8000/process",
+      "body": {
+        "job_type": "gemma-dash",
+        "video_path": ""
+      },
+      "timeout": 300,
+      "merge": true,
+      "depends_on": []
+    }
+  ]
+}

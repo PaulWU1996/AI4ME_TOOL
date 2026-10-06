@@ -82,5 +82,13 @@
         "path": "/app/workflows/semantic-extent-summarise_1.0.json"
       }
     }
+  },
+  "content-avoidance": {
+    "latest": "1.0",
+    "versions": {
+      "1.0": {
+        "path": "/app/workflows/content-avoidance_1.0.json"
+      }
+    }
   }
 }
