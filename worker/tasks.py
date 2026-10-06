@@ -44,7 +44,37 @@ def report_progress(job_id, stage, message):
     )
 
 
-# --- Download Task ---
+# Extensions for extensionless URLs, keyed by the `?format=` query param,
+# then by the bare filename as a fallback.
+_FORMAT_EXTENSIONS = {"json": "json", "text": "txt"}
+_NAME_EXTENSIONS = {"transcript": "txt", "audio": "wav"}
+
+
+def _resolve_filename(parsed):
+    filename = os.path.basename(parsed.path)
+    if os.path.splitext(filename)[1]:
+        return filename
+    format_param = parse_qs(parsed.query).get("format", [None])[0]
+    ext = _FORMAT_EXTENSIONS.get(format_param) or _NAME_EXTENSIONS.get(filename)
+    return f"{filename}.{ext}" if ext else filename
+
+
+def _fetch(path, parsed, dest):
+    if parsed.scheme == "s3":
+        import boto3
+
+        boto3.client("s3").download_file(parsed.netloc, parsed.path.lstrip("/"), dest)
+    elif parsed.scheme in ("http", "https"):
+        with requests.get(path, stream=True) as r:
+            r.raise_for_status()
+            with open(dest, "wb") as f:
+                f.writelines(r.iter_content(8192))
+    elif os.path.exists(path):
+        shutil.copy2(path, dest)
+    else:
+        raise ValueError(f"Unsupported or missing path: {path}")
+
+
 @app.task(name="tasks.download_file", bind=True, autoretry_for=(Exception,),
           max_retries=3, retry_backoff=1.0, retry_backoff_max=60.0)
 def download_file(self, path, job_id, prompts=None):
@@ -52,47 +82,22 @@ def download_file(self, path, job_id, prompts=None):
     os.makedirs(output_dir, exist_ok=True)
     try:
         parsed = urlparse(path)
-        filename = os.path.basename(parsed.path)
-        if not os.path.splitext(filename)[1]:
-            query_params = parse_qs(parsed.query)
-            format_param = query_params.get("format", [None])[0]
-            if format_param == "json":
-                filename = f"{filename}.json"
-            elif format_param == "text":
-                filename = f"{filename}.txt"
-            else:
-                ext = {"transcript": "txt", "audio": "wav"}.get(filename)
-                if ext:
-                    filename = f"{filename}.{ext}"
+        filename = _resolve_filename(parsed)
         dest = os.path.join(output_dir, filename)
-
-        if parsed.scheme == "s3":
-            import boto3
-
-            s3 = boto3.client("s3")
-            s3.download_file(parsed.netloc, parsed.path.lstrip("/"), dest)
-        elif parsed.scheme in ("http", "https"):
-            with requests.get(path, stream=True) as r:
-                r.raise_for_status()
-                with open(dest, "wb") as f:
-                    f.writelines(r.iter_content(8192))
-        elif os.path.exists(path):
-            shutil.copy2(path, dest)
-        else:
-            raise ValueError(f"Unsupported or missing path: {path}")
-
-        print(f"[Downloader] File ready at {dest}")
-        return {
-            "file_path": dest,
-            "file_name": filename,
-            "video_path": f"{job_id}/{filename}", # update down stream services to use file path instead
-            "shared_path": shared_path,
-            "job_id": job_id,
-            "prompts": prompts,
-        }
+        _fetch(path, parsed, dest)
     except Exception:
         shutil.rmtree(output_dir, ignore_errors=True)
         raise
+
+    print(f"[Downloader] File ready at {dest}")
+    return {
+        "file_path": dest,
+        "file_name": filename,
+        "video_path": f"{job_id}/{filename}",  # update down stream services to use file path instead
+        "shared_path": shared_path,
+        "job_id": job_id,
+        "prompts": prompts,
+    }
 
 
 @app.task(name="tasks.http_call")
