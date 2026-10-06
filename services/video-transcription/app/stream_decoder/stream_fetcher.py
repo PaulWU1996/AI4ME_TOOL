@@ -17,25 +17,33 @@ AUDIO_CHANNELS = 2
 AUDIO_SAMPLES_PER_CHUNK = 1024
 AUDIO_BITRATE = 128000
 
-audio_buffer = DashStreamBuffer(max_size=MAX_SEGMENTS)  # buffer for audio DASH segments
-audio_ring_buffer = CircularBuffer(                     # ring buffer for decoded audio chunks
-    capacity=AUDIO_BUFFER_CAPACITY
-) 
-
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 )
 logger = logging.getLogger(__name__)
 
 
-def fetch_dash_stream(
+def fetch_dash_stream_audio(
     programme_id: str,
     start_time_ms: int,
     look_ahead_ms: int,
     output_file: str,
     output_sr: int = 48_000,
 ):
-    global audio_decoder, audio_downloader
+    audio_buffer = DashStreamBuffer(max_size=MAX_SEGMENTS)  # buffer for audio DASH segments
+    audio_ring_buffer = CircularBuffer(capacity=AUDIO_BUFFER_CAPACITY)  # decoded audio chunks
+
+    audio_downloader = DASHMediaFetcher(programme_id)
+
+    def on_audio_representation_available(representation: DASHRepresentation):
+        logger.info(f"Audio representation selected: {representation}")
+
+    if not audio_downloader.init(
+        media_type="audio",
+        quality={"bitrate": AUDIO_BITRATE},
+        rep_selected_func=on_audio_representation_available,
+    ):
+        raise RuntimeError(f"Could not load DASH audio for programme {programme_id}")
 
     audio_decoder = DASHAudioDecoder(
         audio_buffer,
@@ -45,21 +53,10 @@ def fetch_dash_stream(
         num_samples=AUDIO_SAMPLES_PER_CHUNK,
     )
     audio_decoder.start_decoding()
-    audio_downloader = DASHMediaFetcher(programme_id)
-
-    def on_audio_representation_available(representation: DASHRepresentation):
-        logger.info(f"Audio representation selected: {representation}")
-        global fetch_task_audio
-        fetch_task_audio = audio_downloader.fetch_segments_to_buffer(
-            current_time_ms=start_time_ms,
-            look_ahead_ms=look_ahead_ms,
-            buffer=audio_buffer,
-        )
-
-    audio_downloader.init(
-        media_type="audio",
-        quality={"bitrate": AUDIO_BITRATE},
-        rep_selected_func=on_audio_representation_available,
+    audio_downloader.fetch_segments_to_buffer(
+        current_time_ms=start_time_ms,
+        look_ahead_ms=look_ahead_ms,
+        buffer=audio_buffer,
     )
 
     layout = "stereo"
@@ -67,39 +64,45 @@ def fetch_dash_stream(
     next_input_pts = 0
     output_format = "wav"
 
-    try:
-        with av.open(output_file, mode="w", format=output_format) as output:
-            stream = output.add_stream(stream_type, rate=output_sr)
-            stream.layout = layout
+    with av.open(output_file, mode="w", format=output_format) as output:
+        stream = output.add_stream(stream_type, rate=output_sr)
+        stream.layout = layout
 
-            try:
-                while True:
-                    chunk = audio_ring_buffer.pop(timeout=0.1)
-                    if chunk is None:
-                        continue
+        try:
+            while True:
+                # Check liveness before popping: if the decoder had already exited
+                # and the pop still comes back empty, nothing more can arrive.
+                decoding = audio_decoder.thread.is_alive()
+                chunk = audio_ring_buffer.pop(timeout=0.1)
+                if chunk is None:
+                    if not decoding:
+                        break
+                    continue
 
-                    try:
-                        frame = av.AudioFrame.from_ndarray(
-                            chunk.samples,
-                            format=chunk.sample_format,
-                            layout=layout,
-                        )
-                        frame.sample_rate = chunk.sample_rate
-                        frame.pts = next_input_pts
-                        frame.time_base = Fraction(1, chunk.sample_rate)
-                        next_input_pts += frame.samples
+                try:
+                    frame = av.AudioFrame.from_ndarray(
+                        chunk.samples,
+                        format=chunk.sample_format,
+                        layout=layout,
+                    )
+                    frame.sample_rate = chunk.sample_rate
+                    frame.pts = next_input_pts
+                    frame.time_base = Fraction(1, chunk.sample_rate)
+                    next_input_pts += frame.samples
 
-                        for packet in stream.encode(frame):
-                            output.mux(packet)
-                    finally:
-                        audio_decoder.release_chunk(chunk)
-            finally:
-                audio_downloader.stop_fetching()
-                audio_decoder.stop_decoding()
-                                    
-                # signal the end of the stream
-                for packet in stream.encode(None):
-                    output.mux(packet)
-    finally:
-        if locals().get("fetch_task_audio") is not None:
-            locals()["fetch_task_audio"].join(timeout=5)
+                    for packet in stream.encode(frame):
+                        output.mux(packet)
+                finally:
+                    audio_decoder.release_chunk(chunk)
+        finally:
+            audio_downloader.stop_fetching()
+            audio_decoder.stop_decoding()
+
+            # signal the end of the stream
+            for packet in stream.encode(None):
+                output.mux(packet)
+
+    # The decoder logs and swallows its own errors, so an empty output is the
+    # only sign that nothing could be decoded.
+    if next_input_pts == 0:
+        raise RuntimeError(f"No audio decoded from DASH stream for programme {programme_id}")
