@@ -17,7 +17,7 @@ from .media_fetcher import (
 )
 from .media_selector import request_programme
 from .stream_fetcher import (
-                            fetch_dash_stream,
+                            fetch_dash_stream_audio,
 )
 
 __all__ = [
@@ -34,6 +34,6 @@ __all__ = [
                             'FramePool',
                             'MP4FileBuffer',
                             'MP4FileDecoder',
-                            'fetch_dash_stream',
+                            'fetch_dash_stream_audio',
                             'request_programme',
 ]

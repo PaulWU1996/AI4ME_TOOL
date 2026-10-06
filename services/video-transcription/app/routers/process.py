@@ -10,7 +10,7 @@ from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel
 
 from app.services import gemma_runner
-from app.stream_decoder import fetch_dash_stream
+from app.stream_decoder import fetch_dash_stream_audio
 
 logger = logging.getLogger(__name__)
 
@@ -144,7 +144,7 @@ async def process_video(req: ProcessRequest):
         
     if req.job_type == "gemma-dash":
         # download the video from the provided URL and save it to the shared volume
-        fetch_dash_stream(req.programme_id, req.start_time_ms, req.look_ahead_ms, req.video_path, req.output_sr)
+        fetch_dash_stream_audio(req.programme_id, req.start_time_ms, req.look_ahead_ms, req.video_path, req.output_sr)
         
     video_path = _resolve_video(req.job_id, req.video_path)
 
