@@ -29,7 +29,7 @@ services:
     build:
       context: .
       dockerfile: controller/Dockerfile
-    image: ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPO}:controller
+    # image: ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPO}:controller
     container_name: controller
     ports:
       - "9000:9000"
@@ -55,7 +55,7 @@ services:
     build:
       context: .
       dockerfile: worker/Dockerfile
-    image: ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPO}:worker
+    # image: ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPO}:worker
     container_name: worker
     volumes:
       - ./shared:/app/tmp
