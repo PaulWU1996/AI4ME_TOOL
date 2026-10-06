@@ -26,14 +26,16 @@ def _shared_path() -> Path:
 
 class ProcessRequest(BaseModel):
     job_id: str
-    job_type: str = "gemma"
+    job_type: Literal["gemma"] = "gemma"
     video_path: str
     prompts: Optional[str] = None
     language: str = "en"
-    clip_start: Optional[float] = None
-    clip_end: Optional[float] = None
-    shot_detection: Optional[Literal["detect", "test"]] = None
-
+    clip_start: float | None = None
+    clip_end: float | None = None
+    shot_detection: Literal["detect", "test"] | None = None
+    start_time_ms: int | None = None
+    look_ahead_ms: int | None = None
+    output_sr: int = 48_000
 
 class NarrativeSegment(BaseModel):
     start: str
@@ -55,10 +57,10 @@ class ModelsInfo(BaseModel):
 
 class ProcessResponse(BaseModel):
     job_id: str
-    job_type: str
-    narrative: List[NarrativeSegment]
-    audio_narrative: List[NarrativeSegment]
-    transcript: List[TranscriptSegment]
+    job_type: Literal["gemma"]
+    narrative: list[NarrativeSegment]
+    audio_narrative: list[NarrativeSegment]
+    transcript: list[TranscriptSegment]
     audio_detected: bool
     video_duration_seconds: float
     models: ModelsInfo
