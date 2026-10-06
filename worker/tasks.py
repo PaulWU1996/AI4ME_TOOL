@@ -16,7 +16,8 @@ from consts import (
     redis_port,
     shared_path,
 )
-from utils import (
+
+from .utils import (
     load_json_file,
     save_to_shared_disk,
 )
@@ -49,8 +50,9 @@ def report_progress(job_id, stage, message):
 _FORMAT_EXTENSIONS = {"json": "json", "text": "txt"}
 _NAME_EXTENSIONS = {"transcript": "txt", "audio": "wav"}
 
-
 def _resolve_filename(parsed):
+    if parsed.scheme == "dash":
+        return f"{parsed.netloc}.wav"
     filename = os.path.basename(parsed.path)
     if os.path.splitext(filename)[1]:
         return filename
@@ -69,6 +71,14 @@ def _fetch(path, parsed, dest):
             r.raise_for_status()
             with open(dest, "wb") as f:
                 f.writelines(r.iter_content(8192))
+    elif parsed.scheme == "dash":
+        # dash://{programme_id}[?start_ms=..&duration_ms=..] -> audio-only .wav
+        from .stream_decoder import fetch_dash_stream_audio
+
+        params = parse_qs(parsed.query)
+        start_ms = int(params.get("start_ms", [0])[0])
+        duration_ms = int(params.get("duration_ms", [sys.maxsize])[0])
+        fetch_dash_stream_audio(parsed.netloc, start_ms, duration_ms, dest)
     elif os.path.exists(path):
         shutil.copy2(path, dest)
     else:
