@@ -43,7 +43,7 @@ GET  /health   →  routers/process.py  →  services/ollama_client.py
 
 **Request flow** (`routers/process.py`):
 1. `job_type` is a Pydantic `Literal["summary", "tagging"]` on the request model — anything else is rejected by FastAPI's own validation with a 422 before the handler runs
-2. Resolves `$SHARED_VOLUME_PATH/{job_id}/transcript.txt` — 404 if missing
+2. Resolves `$SHARED_VOLUME_PATH/{job_id}/<basename of text_file_path>` (the `transcript.txt` that transcript-tools' `transcript_to_text` returns) — 404 if missing
 3. Checks `MAX_TRANSCRIPT_CHARS` limit (0 = no limit) — 413 if exceeded
 4. Pings Ollama readiness — 503 if down
 5. Looks up the job-type registry (`JOB_TYPES`) by `req.job_type` — prompts dir + response model

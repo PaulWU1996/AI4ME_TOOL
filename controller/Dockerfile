@@ -14,7 +14,6 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY controller/ .
 COPY dag/ ./dag
-COPY workflows ./workflows
 
 EXPOSE 9000
 

@@ -10,6 +10,6 @@ ecr_login
 ensure_repository "$ECR_REPO"
 
 DOCKERFILE="$REPO_ROOT/controller/Dockerfile"
-BUILD_CONTEXT="$REPO_ROOT/controller"
+BUILD_CONTEXT="$REPO_ROOT"
 
 push_image controller

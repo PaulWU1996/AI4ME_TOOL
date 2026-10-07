@@ -19,7 +19,7 @@ def run(payload):
     )
 
     save_to_shared_disk(shared_path, job_id, transcript_text_file, text)
-    return {"file_path": os.path.join(os.path.dirname(file_path), transcript_text_file)}
+    return {"text_file_path": os.path.join(os.path.dirname(file_path), transcript_text_file)}
 
 
 if __name__ == "__main__":

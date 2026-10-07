@@ -164,7 +164,7 @@ services:
   llmtoolsservice:
     profiles: ["on-demand", "llm", "transcription" ]
     build: services/llm-tools
-    image: ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/ai4me/summarise:summarise
+    image: ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPO}:llmtoolsservice
     container_name: llmtoolsservice
     ports:
       - "9003:8000"
@@ -185,13 +185,15 @@ services:
     restart: no
     networks:
       - ai_network
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: all
-              capabilities: [ gpu ]
+
+    # need to be enabled on the aws machine 
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: all
+    #           capabilities: [ gpu ]
 
   transcriptservice:
     profiles: [ "on-demand", "transcription"]
@@ -217,13 +219,13 @@ services:
       timeout: 10s
       retries: 3
       start_period: 10s
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: all
-              capabilities: [ gpu ]
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: all
+    #           capabilities: [ gpu ]
 
   gemma:
     build: ./services/video-transcription
