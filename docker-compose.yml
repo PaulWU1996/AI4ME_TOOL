@@ -196,6 +196,8 @@ services:
   transcriptservice:
     profiles: [ "on-demand", "transcription"]
     build: services/transcript-tools
+    # may want to add another repo env var - for now all services will be scoped to the orchestrator repo.
+    image: ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPO}:transcriptservice
     container_name: transcriptservice
     ports:
       - "9005:8000"
