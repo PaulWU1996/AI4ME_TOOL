@@ -71,14 +71,6 @@ def _fetch(path, parsed, dest):
             r.raise_for_status()
             with open(dest, "wb") as f:
                 f.writelines(r.iter_content(8192))
-    elif parsed.scheme == "dash":
-        # dash://{programme_id}[?start_ms=..&duration_ms=..] -> audio-only .wav
-        from .stream_decoder import fetch_dash_stream_audio
-
-        params = parse_qs(parsed.query)
-        start_ms = int(params.get("start_ms", [0])[0])
-        duration_ms = int(params.get("duration_ms", [sys.maxsize])[0])
-        fetch_dash_stream_audio(parsed.netloc, start_ms, duration_ms, dest)
     elif os.path.exists(path):
         shutil.copy2(path, dest)
     else:
@@ -95,11 +87,11 @@ def download_file(self, path, job_id, prompts=None):
         filename = _resolve_filename(parsed)
         dest = os.path.join(output_dir, filename)
         _fetch(path, parsed, dest)
-    except Exception:
+    except Exception as e:
         shutil.rmtree(output_dir, ignore_errors=True)
-        raise
+        print("download_file failed: ", e)
 
-    print(f"[Downloader] File ready at {dest}")
+    print(f"[FileDownloader] File ready at {dest}")
     return {
         "file_path": dest,
         "file_name": filename,
@@ -109,6 +101,36 @@ def download_file(self, path, job_id, prompts=None):
         "prompts": prompts,
     }
 
+@app.task(
+    name="tasks.download_dashstream",
+    bind=True,
+    autoretry_for=(Exception,),
+    max_retries=3,
+    retry_backoff=1.0,
+    retry_backoff_max=60.0,
+)
+def download_dashstream(
+    job_id: str, filename: str, programme_id: str, start_ms: int, duration_ms: int, prompts=None
+):
+    output_dir = os.path.join(shared_path, job_id)
+    dest = os.path.join(output_dir, filename)
+    os.makedirs(output_dir, exist_ok=True)
+    from .stream_decoder import fetch_dash_stream_audio
+
+    try:
+        fetch_dash_stream_audio(programme_id, start_ms, duration_ms, output_dir)
+    except Exception as e:
+        print("download_dashstream failed: ", e)
+
+    print(f"[DashDownloader] File ready at {dest}")
+    return {
+        "file_path": dest,
+        "file_name": filename,
+        "video_path": f"{job_id}/{filename}",  # update down stream services to use file path instead
+        "shared_path": shared_path,
+        "job_id": job_id,
+        "prompts": prompts,
+    }
 
 @app.task(name="tasks.http_call")
 def http_call(payload, url, method="POST", headers=None, timeout=60, file_field=None,
