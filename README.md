@@ -154,6 +154,13 @@ curl -X POST "http://localhost:9000/process" \
   -d '{"path": "https://example.com/video.mp4", "job_type": "full", "callback_url": "https://your-server/callback", "prompts": "describe the scene"}'
 ```
 
+# media-selector pipeline (default)
+```bash
+curl -X POST "http://localhost:9000/process" \
+  -H "Content-Type: application/json" \
+  -d '{ "job_type": "content-avoidance", "programme_id": "m002vqlg", "start_ms": 0, "duration_ms": 60000 }'
+```
+
 **Request fields:**
 
 | Field | Type | Default | Description |

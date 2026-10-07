@@ -54,11 +54,8 @@ def build_workflow_canvas(request: ProcessRequest, job_id: str, workflow_path: s
     """
     parser = Parser(workflow_path)
     job_context = {
-        "path": request.path,
-        "prompts": request.prompts,
+        **request,
         "job_id": job_id,
-        "job_type": request.job_type,
-        "callback_url": request.callback_url,
     }
     return build_canvas(parser.dag, build_task_map(parser, job_context))
 
