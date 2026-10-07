@@ -102,7 +102,6 @@ def download_file(self, path, job_id, prompts=None):
 
 @app.task(
     name="tasks.media_selector",
-    bind=True,
     autoretry_for=(Exception,),
     max_retries=3,
     retry_backoff=1.0,
@@ -115,18 +114,20 @@ def media_selector(
     duration_ms: int | None,
     prompts=None,
 ):
+    from stream_decoder import fetch_dash_stream_audio
+    
     filename = f'{programme_id}.wav'
+    print(shared_path, job_id)
     output_dir = os.path.join(shared_path, job_id)
-    dest = os.path.join(output_dir, filename)
     os.makedirs(output_dir, exist_ok=True)
-    from .stream_decoder import fetch_dash_stream_audio
+    dest = os.path.join(output_dir, filename)
 
     try:
         fetch_dash_stream_audio(
             programme_id, 
-            start_ms or 0, 
-            duration_ms or sys.maxsize, 
-            output_dir
+            start_time_ms=start_ms or 0, 
+            look_ahead_ms=duration_ms or sys.maxsize, 
+            output_path=dest
         )
     except Exception as e:
         print("media_selector failed: ", e)

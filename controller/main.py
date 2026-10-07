@@ -53,6 +53,7 @@ def build_workflow_canvas(request: ProcessRequest, job_id: str, workflow_path: s
     parser = Parser(workflow_path)
     job_context = {
         **request.model_dump(mode="json"),
+        "job_id": job_id,
     }
     print(f"Job Context: {job_context}")
     return build_canvas(parser.dag, build_task_map(parser, job_context))
@@ -156,6 +157,7 @@ async def start_pipeline(request: ProcessRequest):
             async_kwargs["eta"] = eta_dt
 
     try:
+        # FIX: job_id doenst seem to be added correctly.
         build_workflow_canvas(request, job_id, workflow_entry["path"]).apply_async(
             task_id=job_id, **async_kwargs
         )

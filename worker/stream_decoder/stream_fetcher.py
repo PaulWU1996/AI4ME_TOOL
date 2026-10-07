@@ -27,7 +27,7 @@ def fetch_dash_stream_audio(
     programme_id: str,
     start_time_ms: int,
     look_ahead_ms: int,
-    output_file: str,
+    output_path: str,
     output_sr: int = 48_000,
 ):
     # Fresh buffers per call: the fetcher closes its buffer at EOF, so module-level
@@ -66,7 +66,7 @@ def fetch_dash_stream_audio(
     next_input_pts = 0
     output_format = "wav"
 
-    with av.open(output_file, mode="w", format=output_format) as output:
+    with av.open(output_path, mode="w", format=output_format) as output:
         stream = output.add_stream(stream_type, rate=output_sr)
         stream.layout = layout
 
