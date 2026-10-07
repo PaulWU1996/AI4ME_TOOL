@@ -102,25 +102,35 @@ def download_file(self, path, job_id, prompts=None):
     }
 
 @app.task(
-    name="tasks.download_dashstream",
+    name="tasks.media_selector",
     bind=True,
     autoretry_for=(Exception,),
     max_retries=3,
     retry_backoff=1.0,
     retry_backoff_max=60.0,
 )
-def download_dashstream(
-    job_id: str, filename: str, programme_id: str, start_ms: int, duration_ms: int, prompts=None
+def media_selector(
+    job_id: str,
+    programme_id: str,
+    start_ms: int | None,
+    duration_ms: int | None,
+    prompts=None,
 ):
+    filename = f'{programme_id}.wav'
     output_dir = os.path.join(shared_path, job_id)
     dest = os.path.join(output_dir, filename)
     os.makedirs(output_dir, exist_ok=True)
     from .stream_decoder import fetch_dash_stream_audio
 
     try:
-        fetch_dash_stream_audio(programme_id, start_ms, duration_ms, output_dir)
+        fetch_dash_stream_audio(
+            programme_id, 
+            start_ms or 0, 
+            duration_ms or sys.maxsize, 
+            output_dir
+        )
     except Exception as e:
-        print("download_dashstream failed: ", e)
+        print("media_selector failed: ", e)
 
     print(f"[DashDownloader] File ready at {dest}")
     return {
@@ -130,6 +140,7 @@ def download_dashstream(
         "shared_path": shared_path,
         "job_id": job_id,
         "prompts": prompts,
+        "storage_id": programme_id,
     }
 
 @app.task(name="tasks.http_call")
@@ -200,7 +211,7 @@ def _task_script_path(script):
 @app.task(name="tasks.python_call")
 def python_call(payload, script, params=None, timeout=python_call_timeout, merge=False):
     if not isinstance(payload, dict):
-        raise ValueError("python_call: payload must be a mapping.")
+        raise TypeError("python_call: payload must be a mapping.")
     if params is not None and not isinstance(params, dict):
         raise ValueError("python_call: params must be a mapping.")
 
@@ -232,7 +243,7 @@ def python_call(payload, script, params=None, timeout=python_call_timeout, merge
         return {**payload, **result}
     return result
 
-# remove this and instead each stage manages storage internally or with an optional callback_url
+# remove this and instead each stage manages storage internally or with an optional callback_url (to push status) and internal storage call
 @app.task(name="tasks.finalize_results")
 def finalize_results(job_id, job_type="full", callback_url=None, expects=None):
     """Merge a job's outputs, write task_info.txt, and report success.
