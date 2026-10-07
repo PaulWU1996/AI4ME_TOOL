@@ -21,7 +21,7 @@ def _shared_path() -> Path:
 class ProcessRequest(BaseModel):
     job_id: str
     job_type: Literal["summary", "tagging"] = "summary"
-    file_name: str
+    text_file_path: str
     prompts: Optional[str] = None
     language: str = "en"
 
@@ -63,8 +63,8 @@ def validate_result(job_type: str, result: dict) -> dict:
 @router.post("/process", response_model=SummaryResponse | TaggingResponse)
 async def process_text(req: ProcessRequest):
     logger.info(
-        "job received | file_name=%s job_id=%s job_type=%s language=%s",
-        req.file_name,
+        "job received | text_file_path=%s job_id=%s job_type=%s language=%s",
+        req.text_file_path,
         req.job_id,
         req.job_type,
         req.language,
@@ -77,7 +77,10 @@ async def process_text(req: ProcessRequest):
             detail=f"job_type '{req.job_type}' is not handled by this service",
         )
 
-    text_path = _shared_path() / req.job_id / req.file_name
+    # Only the basename is used: the caller's path is under its own mount of the
+    # shared volume, which need not match SHARED_VOLUME_PATH here.
+    text_name = Path(req.text_file_path).name
+    text_path = _shared_path() / req.job_id / text_name
 
     if not text_path.exists():
         logger.warning("text not found | job_id=%s path=%s", req.job_id, text_path)
@@ -90,7 +93,7 @@ async def process_text(req: ProcessRequest):
 
     if not text:
         logger.warning("text is empty | job_id=%s", req.job_id)
-        raise HTTPException(status_code=422, detail=f"{req.file_name} is empty")
+        raise HTTPException(status_code=422, detail=f"{text_name} is empty")
 
     logger.info("text read | job_id=%s chars=%d", req.job_id, len(text))
 

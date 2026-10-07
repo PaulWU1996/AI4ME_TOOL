@@ -63,6 +63,7 @@ curl -X POST http://localhost:8000/process \
 | Field | Type | Required | Description |
 |---|---|---|---|
 | `job_id` | string | yes | Orchestrator-assigned job identity |
+| `text_file_path` | string | yes | Path to the transcript text, as returned by transcript-tools' `transcript_to_text`; only its basename is read, from `shared/{job_id}/` |
 | `job_type` | string | yes | Must be `"script"` |
 | `mode` | string | no | Which function to run — `"summary"` (default) or `"tagging"`. See [Modes](#modes) |
 | `language` | string | no | Response language, e.g. `"en"`, `"zh"` (default `"en"`) |

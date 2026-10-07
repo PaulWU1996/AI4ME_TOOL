@@ -44,7 +44,7 @@
     {
       "id": "summarise",
       "driver": "http",
-      "url": "http://transcriptservice:8000/process",
+      "url": "http://llmtoolsservice:8000/process",
       "body": {
         "job_type": "summary"
       },
@@ -58,7 +58,7 @@
     {
       "id": "tagging",
       "driver": "http",
-      "url": "http://transcriptservice:8000/process",
+      "url": "http://llmtoolsservice:8000/process",
       "body": {
         "job_type": "tagging"
       },

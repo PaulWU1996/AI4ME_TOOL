@@ -13,4 +13,4 @@ ensure_repository "$ECR_REPO"
 DOCKERFILE="$REPO_ROOT/Dockerfile"
 BUILD_CONTEXT="$REPO_ROOT/"
 
-push_image summarise
+push_image llmtoolsservice
