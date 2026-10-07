@@ -14,3 +14,4 @@ scenedetect[opencv]
 fastapi==0.111.*
 uvicorn[standard]==0.30.*
 pydantic==2.*
+pymongo>=4.7.0

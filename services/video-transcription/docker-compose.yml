@@ -19,6 +19,11 @@ services:
       - UVICORN_LOG_LEVEL=info
       - MAX_TOTAL_FRAMES=96
       - AUDIO_MAX_SECONDS=30
+      - MONGO_HOST=${MONGO_HOST:-}
+      - MONGO_PORT=${MONGO_PORT:-}
+      - MONGO_DATABASE=${MONGO_DATABASE:-}
+      - MONGO_MACHINE_USER=${MONGO_MACHINE_USER:-}
+      - MONGO_MACHINE_PASSWORD=${MONGO_MACHINE_PASSWORD:-}
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
       interval: 30s

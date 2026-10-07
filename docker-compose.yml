@@ -230,6 +230,9 @@ services:
     volumes:
       - .:/workspace/AI4ME_TOOL
       - ${HOME}/.cache/huggingface:/root/.cache/huggingface
+    env_file:
+      - path: ./services/video-transcription/.env
+        required: false
     environment:
       - HF_TOKEN=${HF_TOKEN:-}
       - NVIDIA_VISIBLE_DEVICES=all

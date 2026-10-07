@@ -9,7 +9,7 @@ from fastapi import APIRouter, HTTPException
 from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel
 
-from app.services import gemma_runner
+from app.services import gemma_runner, mongodb
 
 logger = logging.getLogger(__name__)
 
@@ -33,9 +33,9 @@ class ProcessRequest(BaseModel):
     clip_start: float | None = None
     clip_end: float | None = None
     shot_detection: Literal["detect", "test"] | None = None
-    start_time_ms: int | None = None
-    look_ahead_ms: int | None = None
-    output_sr: int = 48_000
+    storage_type: Literal["file_system", "mongodb"] = "file_system"
+    storage_id: str | None = None
+
 
 class NarrativeSegment(BaseModel):
     start: str
@@ -117,8 +117,17 @@ def _write_json(path: Path, payload) -> None:
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
+def _write_outputs(job_id: str, video_stem: str, response: ProcessResponse, result: dict) -> Path:
+    job_dir = _shared_path() / job_id
+    _write_json(job_dir / "output.json", response.model_dump())
+    _write_json(job_dir / f"{video_stem}_gemma_visual_output.json", result["narrative"])
+    _write_json(job_dir / f"{video_stem}_gemma_audio_output.json", result["audio_narrative"])
+    _write_json(job_dir / f"{video_stem}_gemma_transcript_output.json", result["transcript"])
+    return job_dir
+
+
 @router.post("/process", response_model=ProcessResponse)
-async def process_video(req: ProcessRequest):
+async def process(req: ProcessRequest):
     logger.info(
         "job received | job_id=%s job_type=%s language=%s video_path=%s",
         req.job_id,
@@ -132,6 +141,16 @@ async def process_video(req: ProcessRequest):
     if not gemma_runner.is_ready():
         logger.error("model not loaded | job_id=%s", req.job_id)
         raise HTTPException(status_code=503, detail="Model is not loaded yet")
+
+    if req.storage_type == "mongodb":
+        try:
+            await run_in_threadpool(mongodb.ensure_available)
+        except Exception as exc:
+            logger.error("mongo unavailable | job_id=%s error=%s", req.job_id, exc)
+            raise HTTPException(
+                status_code=503,
+                detail=f"MongoDB storage unavailable, analysis not started: {exc}",
+            )
 
     logger.info("analysis start | job_id=%s path=%s", req.job_id, video_path)
 
@@ -173,14 +192,26 @@ async def process_video(req: ProcessRequest):
 
     response = ProcessResponse(job_id=req.job_id, job_type=req.job_type, **result)
 
-    # should this be managed at the orchestator level?
-    job_dir = _shared_path() / req.job_id
-    stem = video_path.stem
-    _write_json(job_dir / "output.json", response.model_dump())
-    _write_json(job_dir / f"{stem}_gemma_visual_output.json", result["narrative"])
-    _write_json(job_dir / f"{stem}_gemma_audio_output.json", result["audio_narrative"])
-    _write_json(job_dir / f"{stem}_gemma_transcript_output.json", result["transcript"])
-    logger.info("output written | job_id=%s dir=%s", req.job_id, job_dir)
+    if req.storage_type == "mongodb":
+        doc = {
+            "full_output": response.model_dump(),
+            "narrative": result["narrative"],
+            "audio_narrative": result["audio_narrative"],
+            "transcript": result["transcript"],
+        }
+        try:
+            await run_in_threadpool(mongodb.store_obj, req.storage_id or req.job_id, doc)
+        except Exception as exc:
+            logger.exception("mongo store failed | job_id=%s", req.job_id)
+            job_dir = _write_outputs(req.job_id, video_path.stem, response, result)
+            raise HTTPException(
+                status_code=503,
+                detail=(f"MongoDB store failed ({exc}); analysis preserved in {job_dir}"),
+            )
+        logger.info("stored in mongodb | job_id=%s id=%s", req.job_id, req.storage_id or req.job_id)
+    else:
+        job_dir = _write_outputs(req.job_id, video_path.stem, response, result)
+        logger.info("output written | job_id=%s dir=%s", req.job_id, job_dir)
 
     return response
 

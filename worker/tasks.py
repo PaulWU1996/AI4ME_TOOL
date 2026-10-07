@@ -16,8 +16,7 @@ from consts import (
     redis_port,
     shared_path,
 )
-
-from .utils import (
+from utils import (
     load_json_file,
     save_to_shared_disk,
 )
