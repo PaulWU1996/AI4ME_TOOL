@@ -1,0 +1,33 @@
+{
+  "workflow": {
+    "name": "content-avoidance",
+    "version": "1.0"
+  },
+  "settings": {
+    "on_failure": "stop",
+    "retry_backoff": 1.0
+  },
+  "tasks": [
+    {
+      "id": "media_selector",
+      "task": "media_selector",
+      "call": "kwargs",
+      "inject": ["job_id","programme_id", "start_ms", "duration_ms", "prompts"],
+      "requires": ["programme_id"],
+      "depends_on": [],
+      "retries": 3
+    },
+    {
+      "id": "gemma",
+      "driver": "http",
+      "url": "http://gemma:8000/process",
+      "body": {
+        "job_type": "gemma",
+        "storage_type": "mongodb"
+      },
+      "timeout": 300,
+      "merge": true,
+      "depends_on": ["media_selector"]
+    }
+  ]
+}
