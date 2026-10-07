@@ -7,7 +7,7 @@ from celery.result import AsyncResult
 from dag.compose import build_canvas, build_task_map
 from dag.parser import Parser
 from fastapi import Body, FastAPI, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 from tasks import app as celery_app
 
 app = FastAPI()
@@ -37,9 +37,7 @@ def save_registry(registry: dict):
 
 
 class ProcessRequest(BaseModel):
-    path: str
-    callback_url: str | None = None
-    prompts: str | None = None
+    model_config = ConfigDict(extra="allow")
     job_type: str = "full"
     version: str | None = None  # pin a specific registered workflow version; defaults to latest
     run_at_ms: int | None = None
@@ -54,9 +52,9 @@ def build_workflow_canvas(request: ProcessRequest, job_id: str, workflow_path: s
     """
     parser = Parser(workflow_path)
     job_context = {
-        **request,
-        "job_id": job_id,
+        **request.model_dump(mode="json"),
     }
+    print(f"Job Context: {job_context}")
     return build_canvas(parser.dag, build_task_map(parser, job_context))
 
 
