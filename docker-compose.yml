@@ -241,6 +241,11 @@ services:
       - HF_TOKEN=${HF_TOKEN:-}
       - NVIDIA_VISIBLE_DEVICES=all
       - NVIDIA_DRIVER_CAPABILITIES=compute,utility,video
+      - MONGO_MACHINE_USER=${MONGO_MACHINE_USER}
+      - MONGO_MACHINE_PASSWORD=${MONGO_MACHINE_PASSWORD}
+      - MONGO_DATABASE=${MONGO_DATABASE}
+      - MONGO_PORT=${MONGO_PORT}
+      - MONGO_HOST=${MONGO_HOST}
     deploy:
       resources:
         reservations:
