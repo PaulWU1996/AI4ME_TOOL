@@ -1,7 +1,7 @@
 {
   "workflow": {
-    "name": "summarise",
-    "version": "1.1"
+    "name": "summarise-tagging",
+    "version": "1.0"
   },
   "settings": {
     "on_failure": "stop",
@@ -48,6 +48,20 @@
       "timeout": 1800,
       "depends_on": [
         "transcript"
+      ]
+    },
+    {
+      "id": "tagging",
+      "driver": "http",
+      "url": "http://llmtoolsservice:8000/process",
+      "body": {
+        "job_type": "tagging"
+      },
+      "merge": true,
+      "save": "tagging_output",
+      "timeout": 1800,
+      "depends_on": [
+        "summarise"
       ]
     },
     {

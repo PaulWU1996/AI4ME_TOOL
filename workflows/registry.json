@@ -79,5 +79,13 @@
         "path": "/app/workflows/semantic-extent-summarise_1.0.json"
       }
     }
+  },
+  "summarise-tagging": {
+    "latest": "1.0",
+    "versions": {
+      "1.0": {
+        "path": "/app/workflows/summarise-tagging_1.0.json"
+      }
+    }
   }
 }
