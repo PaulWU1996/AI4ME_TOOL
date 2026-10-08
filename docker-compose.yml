@@ -230,15 +230,23 @@ services:
   gemma:
     build: ./services/video-transcription
     container_name: gemma
-    working_dir: /workspace/AI4ME_TOOL/gemma
     volumes:
-      - .:/workspace/AI4ME_TOOL
+      # Mounted at /shared (SHARED_VOLUME_PATH) so the worker's `{job_id}/{file}`
+      # video_path resolves to the file media_selector wrote under ./shared.
+      - ./shared:/shared
       - ${HOME}/.cache/huggingface:/root/.cache/huggingface
     env_file:
       - path: ./services/video-transcription/.env
         required: false
     environment:
       - HF_TOKEN=${HF_TOKEN:-}
+      - MODEL_ID=${MODEL_ID:-google/gemma-4-E4B-it}
+      - AUDIO_MODEL_ID=${AUDIO_MODEL_ID:-google/gemma-4-E4B-it}
+      - SHARED_VOLUME_PATH=/shared
+      - UVICORN_WORKERS=1
+      - UVICORN_LOG_LEVEL=info
+      - MAX_TOTAL_FRAMES=96
+      - AUDIO_MAX_SECONDS=30
       - NVIDIA_VISIBLE_DEVICES=all
       - NVIDIA_DRIVER_CAPABILITIES=compute,utility,video
       - MONGO_MACHINE_USER=${MONGO_MACHINE_USER}
@@ -253,9 +261,12 @@ services:
             - driver: nvidia
               count: all
               capabilities: [ gpu ]
-    command: ["bash"]
-    stdin_open: true
-    tty: true
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 5m
     networks:
       - ai_network
     profiles: ["gemma"]

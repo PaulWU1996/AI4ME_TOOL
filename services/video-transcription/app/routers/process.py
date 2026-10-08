@@ -76,10 +76,12 @@ def _resolve_video(job_id: str, video_path: str) -> Path:
     never reach another job's media.
     """
     if not video_path.strip():
+        logger.warning("video_path empty | job_id=%s", job_id)
         raise HTTPException(status_code=422, detail="video_path is empty")
 
     requested = Path(video_path)
     if requested.is_absolute():
+        logger.warning("video_path absolute | job_id=%s video_path=%s", job_id, video_path)
         raise HTTPException(
             status_code=422,
             detail=(
@@ -92,6 +94,13 @@ def _resolve_video(job_id: str, video_path: str) -> Path:
     job_dir = (shared_root / job_id).resolve()
     resolved = (shared_root / requested).resolve()
     if not resolved.is_relative_to(job_dir):
+        logger.warning(
+            "video_path outside job dir | job_id=%s video_path=%s resolved=%s job_dir=%s",
+            job_id,
+            video_path,
+            resolved,
+            job_dir,
+        )
         raise HTTPException(
             status_code=422,
             detail=(
@@ -100,11 +109,13 @@ def _resolve_video(job_id: str, video_path: str) -> Path:
             ),
         )
     if not resolved.exists():
+        logger.warning("video not found | job_id=%s path=%s", job_id, resolved)
         raise HTTPException(
             status_code=404,
             detail=f"video not found for job {job_id}: {video_path}",
         )
     if not resolved.is_file():
+        logger.warning("video_path not a file | job_id=%s path=%s", job_id, resolved)
         raise HTTPException(
             status_code=422,
             detail=f"video_path is not a file: {video_path}",
