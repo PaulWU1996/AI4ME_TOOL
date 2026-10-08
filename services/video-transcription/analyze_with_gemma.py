@@ -148,11 +148,13 @@ def main() -> int:
     )
 
     for key in ("narrative", "audio_narrative", "transcript"):
-        print(json.dumps(result[key], ensure_ascii=False, indent=2))
+        if key in result:
+            print(json.dumps(result[key], ensure_ascii=False, indent=2))
 
     if args.output:
         output_path = Path(args.output).expanduser().resolve()
-        write_json(Path(str(output_path) + "_gemma_visual_output.json"), result["narrative"])
+        if "narrative" in result:
+            write_json(Path(str(output_path) + "_gemma_visual_output.json"), result["narrative"])
         write_json(Path(str(output_path) + "_gemma_audio_output.json"), result["audio_narrative"])
         write_json(Path(str(output_path) + "_gemma_transcript_output.json"), result["transcript"])
 

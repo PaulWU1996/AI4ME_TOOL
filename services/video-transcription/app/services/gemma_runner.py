@@ -508,10 +508,17 @@ def build_context(
     return "\n".join(lines)
 
 
-def build_instructions(language: str) -> str:
-    """Render the requirements + fixed output schema from `app/prompts/analysis`."""
+def build_instructions(language: str, clip_has_video: bool = True) -> str:
+    """Render the requirements + fixed output schema from `app/prompts/analysis`.
+
+    Audio-only input gets a schema without the visual `narrative` key, so the
+    model is never asked to describe frames it was not given.
+    """
     requirements = (PROMPTS_DIR / "transcript.txt").read_text(encoding="utf-8")
-    output_structure = (PROMPTS_DIR / "output_structure.txt").read_text(encoding="utf-8")
+    structure_file = (
+        "output_structure.txt" if clip_has_video else "output_structure_audio_only.txt"
+    )
+    output_structure = (PROMPTS_DIR / structure_file).read_text(encoding="utf-8")
     return (
         requirements.format_map({"language": language}).strip()
         + "\n\n"
@@ -719,6 +726,8 @@ def analyze(
 ) -> Dict[str, Any]:
     """Analyse `video_path` and return narrative, audio narrative and transcript.
 
+    Audio-only input has no visual `narrative`; the key is omitted from the result.
+
     Blocking and GPU-bound; callers on an event loop must run it in a thread.
     """
     settings = get_settings()
@@ -755,7 +764,7 @@ def analyze(
     )
 
     context_text = build_context(prompts, clip_has_audio, clip_has_video)
-    prompt_text = build_instructions(language)
+    prompt_text = build_instructions(language, clip_has_video)
 
     narratives: List[Dict[str, Any]] = []
     audio_narratives: List[Dict[str, Any]] = []
@@ -809,9 +818,10 @@ def analyze(
             "end": format_timecode(shot["end"] if shot["end"] is not None else duration_seconds),
         }
         audio_analysis = analysis.get("audio_analysis", {})
-        narratives.append(
-            {**timecode, "caption": analysis.get("narrative", "") or ""}
-        )
+        if clip_has_video:
+            narratives.append(
+                {**timecode, "caption": analysis.get("narrative", "") or ""}
+            )
         audio_narratives.append(
             {**timecode, "caption": audio_analysis.get("audio_narrative", "") or ""}
         )
@@ -819,17 +829,22 @@ def analyze(
             {**timecode, "transcript": audio_analysis.get("transcript", "") or ""}
         )
 
-    return {
-        "narrative": narratives,
-        "audio_narrative": audio_narratives,
-        "transcript": transcripts,
-        "audio_detected": clip_has_audio,
-        "video_detected": clip_has_video,
-        "video_duration_seconds": round(duration_seconds, 3),
-        "models": {
-            "primary_model": primary.model_id,
-            "audio_analysis_model": audio_runner.model_id,
-            "primary_supports_audio": primary.supports_audio,
-        },
-        "processing_time_ms": int((time.monotonic() - t0) * 1000),
-    }
+    result: Dict[str, Any] = {}
+    if clip_has_video:
+        result["narrative"] = narratives
+    result.update(
+        {
+            "audio_narrative": audio_narratives,
+            "transcript": transcripts,
+            "audio_detected": clip_has_audio,
+            "video_detected": clip_has_video,
+            "video_duration_seconds": round(duration_seconds, 3),
+            "models": {
+                "primary_model": primary.model_id,
+                "audio_analysis_model": audio_runner.model_id,
+                "primary_supports_audio": primary.supports_audio,
+            },
+            "processing_time_ms": int((time.monotonic() - t0) * 1000),
+        }
+    )
+    return result

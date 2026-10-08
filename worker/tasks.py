@@ -309,7 +309,8 @@ def finalize_results(job_id, job_type="full", callback_url=None, expects=None):
         "summarise": summarise_data,
         "extent": extent_data,
         "tagging": tagging_data,
-        "gemma": gemma_data if len(gemma_data) == len(gemma_labels) else None,
+        # The visual file is absent for audio-only input, so only audio + transcript are required.
+        "gemma": gemma_data if {"audio", "transcript"} <= gemma_data.keys() else None,
     }
 
     if expects is None:

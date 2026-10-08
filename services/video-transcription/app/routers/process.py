@@ -58,7 +58,7 @@ class ModelsInfo(BaseModel):
 class ProcessResponse(BaseModel):
     job_id: str
     job_type: Literal["gemma"]
-    narrative: list[NarrativeSegment]
+    narrative: list[NarrativeSegment] | None = None  # absent for audio-only input
     audio_narrative: list[NarrativeSegment]
     transcript: list[TranscriptSegment]
     audio_detected: bool
@@ -131,14 +131,15 @@ def _write_json(path: Path, payload) -> None:
 
 def _write_outputs(job_id: str, video_stem: str, response: ProcessResponse, result: dict) -> Path:
     job_dir = _shared_path() / job_id
-    _write_json(job_dir / "output.json", response.model_dump())
-    _write_json(job_dir / f"{video_stem}_gemma_visual_output.json", result["narrative"])
+    _write_json(job_dir / "output.json", response.model_dump(exclude_none=True))
+    if "narrative" in result:
+        _write_json(job_dir / f"{video_stem}_gemma_visual_output.json", result["narrative"])
     _write_json(job_dir / f"{video_stem}_gemma_audio_output.json", result["audio_narrative"])
     _write_json(job_dir / f"{video_stem}_gemma_transcript_output.json", result["transcript"])
     return job_dir
 
 
-@router.post("/process", response_model=ProcessResponse)
+@router.post("/process", response_model=ProcessResponse, response_model_exclude_none=True)
 async def process(req: ProcessRequest):
     logger.info(
         "job received | job_id=%s job_type=%s language=%s video_path=%s",
@@ -187,7 +188,10 @@ async def process(req: ProcessRequest):
         logger.exception("analysis crashed | job_id=%s", req.job_id)
         raise HTTPException(status_code=500, detail=f"Analysis failed: {exc}")
 
-    empty = [name for name in ("narrative", "audio_narrative", "transcript") if not result[name]]
+    expected = ("narrative", "audio_narrative", "transcript")
+    if not result["video_detected"]:
+        expected = ("audio_narrative", "transcript")
+    empty = [name for name in expected if not result[name]]
     if empty:
         logger.error("empty analysis result | job_id=%s missing=%s", req.job_id, empty)
         raise HTTPException(
@@ -198,7 +202,7 @@ async def process(req: ProcessRequest):
     logger.info(
         "analysis done | job_id=%s shots=%d ms=%d",
         req.job_id,
-        len(result["narrative"]),
+        len(result["transcript"]),
         result["processing_time_ms"],
     )
 
@@ -206,11 +210,12 @@ async def process(req: ProcessRequest):
 
     if req.storage_type == "mongodb":
         doc = {
-            "full_output": response.model_dump(),
-            "narrative": result["narrative"],
+            "full_output": response.model_dump(exclude_none=True),
             "audio_narrative": result["audio_narrative"],
             "transcript": result["transcript"],
         }
+        if "narrative" in result:
+            doc["narrative"] = result["narrative"]
         try:
             await run_in_threadpool(mongodb.store_obj, req.storage_id or req.job_id, doc)
         except Exception as exc:

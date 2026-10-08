@@ -1,0 +1,7 @@
+Respond ONLY with this exact JSON object, with no extra text:
+{
+  "audio_analysis": {
+    "transcript": "<best-effort transcript, or an empty string if nothing is intelligible>",
+    "audio_narrative": "<detailed description of what happens in the clip, making use of the transcript, the spoken tone and any other sounds>"
+  }
+}
