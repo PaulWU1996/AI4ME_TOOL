@@ -2,24 +2,25 @@ import json
 import os
 
 from fastapi import Body, FastAPI, HTTPException
-from celery import uuid, signature
+from celery import uuid
 from celery.result import AsyncResult
 from tasks import app as celery_app
 from pydantic import BaseModel
 from typing import Optional
 from datetime import datetime, timezone
 
+from dag.compose import build_canvas, build_task_map
 from dag.parser import Parser
 
 app = FastAPI()
 
-SUPPORTED_JOB_TYPES = ["full", "audio_only", "visual_only", "summarise", "speaker-extent-summarise", "utterance-extent-summarise", "tagging"]
 MAX_ETA_SECONDS = 3600  # set to visibility_timeout value
 
-# Registered DAG workflows dispatch through tasks.execute_workflow instead of
-# the legacy build_chain() below. WORKFLOWS_PATH is a volume shared between
-# the controller and worker containers; registry.json maps a workflow's own
-# `workflow.name` to its file, and is updated by POST /workflows.
+# All jobs dispatch through registered DAG workflows, translated by
+# dag/compose.py into a Celery chain-of-groups canvas. WORKFLOWS_PATH is a
+# volume shared between the controller and worker containers; registry.json
+# maps a workflow's own `workflow.name` to its file, and is updated by
+# POST /workflows.
 WORKFLOWS_PATH = os.getenv("WORKFLOWS_PATH", "/app/workflows")
 REGISTRY_PATH = os.path.join(WORKFLOWS_PATH, "registry.json")
 
@@ -39,110 +40,42 @@ def save_registry(registry: dict):
 
 class ProcessRequest(BaseModel):
     path: str
-    callback_url: Optional[str] = None
-    prompts: Optional[str] = None
+    callback_url: str | None = None
+    prompts: str | None = None
     job_type: str = "full"
-    version: Optional[str] = None  # pin a specific registered workflow version; defaults to latest
-    run_at_ms: Optional[int] = None
+    version: str | None = None  # pin a specific registered workflow version; defaults to latest
+    run_at_ms: int | None = None
 
 
-def build_chain(request: ProcessRequest, job_id: str):
-    download = signature(
-        "tasks.download_file",
-        args=[request.path, job_id],
-        kwargs={"prompts": request.prompts},
-        immutable=True,
-    )
-    summarise = signature("tasks.process_summarise")
-    tagging = signature("tasks.process_tags")
-    transcript_to_text = signature("tasks.transcript_to_text")
-    finalize = signature(
-        "tasks.finalize_results",
-        args=[job_id],
-        kwargs={"job_type": request.job_type, "callback_url": request.callback_url},
-        immutable=True,
-    ).set(task_id=job_id)
+def build_workflow_canvas(request: ProcessRequest, job_id: str, workflow_path: str):
+    """Translate a registered workflow template into a Celery canvas.
 
-    chains = {
-        "full": (
-            download
-            | signature("tasks.process_visual")
-            | signature("tasks.process_audio")
-            | finalize
-        ),
-        "audio_only": (
-            download 
-            | signature("tasks.process_audio") 
-            | finalize
-        ),
-        "visual_only": (
-            download 
-            | signature("tasks.process_visual") 
-            | finalize
-        ),
-        "summarise": (
-            download 
-            | transcript_to_text
-            | summarise 
-            | tagging
-            | finalize
-        ),
-        "speaker-extent-summarise": (
-            download 
-            | signature("tasks.speaker_extent") 
-            | transcript_to_text 
-            | summarise 
-            | tagging
-            | finalize
-        ),
-        "utterance-extent-summarise": (
-            download 
-            | signature("tasks.segment_extent") 
-            | transcript_to_text 
-            | summarise 
-            | tagging
-            | finalize
-        ),
-        "tagging": (
-            download 
-            | transcript_to_text 
-            | tagging 
-            | finalize
-        ),
+    The workflow's `path`/`prompts` and this request's job metadata are fed
+    into the canvas as per-job context (like the old `job_inputs`), rather
+    than being baked into the reusable template.
+    """
+    parser = Parser(workflow_path)
+    job_context = {
+        "path": request.path,
+        "prompts": request.prompts,
+        "job_id": job_id,
+        "job_type": request.job_type,
+        "callback_url": request.callback_url,
     }
-    return chains.get(request.job_type)
-
-
-def build_dag_workflow(request: ProcessRequest, job_id: str, workflow_path: str):
-    return signature(
-        "tasks.execute_workflow",
-        kwargs={
-            "workflow_path": workflow_path,
-            "job_id": job_id,
-            "path": request.path,
-            "prompts": request.prompts,
-            "job_type": request.job_type,
-            "callback_url": request.callback_url,
-        },
-        immutable=True,
-    ).set(task_id=job_id)
+    return build_canvas(parser.dag, build_task_map(parser, job_context))
 
 
 @app.post("/workflows")
-async def register_workflow(workflow: dict = Body(...)):
+async def register_workflow():
     """Validate and permanently register a DAG workflow template version, so
     it can be referenced as a `job_type` (optionally pinned to a `version`)
     in POST /process afterwards.
 
     A name may hold multiple registered versions; `latest` tracks whichever
     was registered most recently and is what /process uses when a request
-    doesn't pin a specific version. This applies to built-in job_type names
-    too (e.g. "full") — build_chain()'s hardcoded chains are being phased
-    out, so registering a DAG version under a built-in name is intentional:
-    it becomes the default for that name once it's `latest`, and the legacy
-    chain remains reachable only for requests with no matching registry
-    entry at all.
+    doesn't pin a specific version.
     """
+    workflow: dict = Body(...)
     meta = workflow.get("workflow") or {}
     name = meta.get("name")
     version = meta.get("version")
@@ -203,10 +136,11 @@ async def start_pipeline(request: ProcessRequest):
             detail=f"job_type '{request.job_type}' has no registered versions to pin.",
         )
 
-    if request.job_type not in SUPPORTED_JOB_TYPES and workflow_entry is None:
+    if workflow_entry is None:
         raise HTTPException(
             status_code=400,
-            detail=f"Unsupported job_type '{request.job_type}'. Choose from: {SUPPORTED_JOB_TYPES + list(registry.keys())}",
+            detail=f"Unsupported job_type '{request.job_type}'. "
+            f"Register a workflow first via POST /workflows. Available: {list(registry.keys())}.",
         )
 
     job_id = uuid()
@@ -229,10 +163,9 @@ async def start_pipeline(request: ProcessRequest):
             async_kwargs["eta"] = eta_dt
 
     try:
-        if workflow_entry is not None:
-            build_dag_workflow(request, job_id, workflow_entry["path"]).apply_async(**async_kwargs)
-        else:
-            build_chain(request, job_id).apply_async(**async_kwargs)
+        build_workflow_canvas(request, job_id, workflow_entry["path"]).apply_async(
+            task_id=job_id, **async_kwargs
+        )
         return {"status": "submitted", "job_id": job_id, "job_type": request.job_type}
 
     except Exception as e:
