@@ -62,6 +62,7 @@ class ProcessResponse(BaseModel):
     audio_narrative: list[NarrativeSegment]
     transcript: list[TranscriptSegment]
     audio_detected: bool
+    video_detected: bool
     video_duration_seconds: float
     models: ModelsInfo
     processing_time_ms: int

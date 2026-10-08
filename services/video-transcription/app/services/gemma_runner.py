@@ -219,12 +219,20 @@ def model_status() -> Dict[str, Any]:
 # --------------------------------------------------------------------------
 
 def ffprobe_has_audio_stream(path: Path) -> bool:
+    return _ffprobe_has_stream(path, "a")
+
+
+def ffprobe_has_video_stream(path: Path) -> bool:
+    return _ffprobe_has_stream(path, "v")
+
+
+def _ffprobe_has_stream(path: Path, stream_type: str) -> bool:
     cmd = [
         "ffprobe",
         "-v",
         "error",
         "-select_streams",
-        "a",
+        stream_type,
         "-show_entries",
         "stream=index",
         "-of",
@@ -238,16 +246,38 @@ def ffprobe_has_audio_stream(path: Path) -> bool:
 
 
 def probe_duration_seconds(video_path: Path) -> float:
-    """Return the container duration in seconds, or 0.0 if it cannot be read."""
+    """Return the container duration in seconds, or 0.0 if it cannot be read.
+
+    OpenCV only knows about video frames, so audio-only files (e.g. the `.wav`
+    the content-avoidance media_selector produces) fall back to ffprobe.
+    """
     cap = cv2.VideoCapture(str(video_path))
     try:
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
         fps = float(cap.get(cv2.CAP_PROP_FPS) or 0.0)
     finally:
         cap.release()
-    if total_frames <= 0 or fps <= 0:
+    if total_frames > 0 and fps > 0:
+        return total_frames / fps
+    return _ffprobe_duration_seconds(video_path)
+
+
+def _ffprobe_duration_seconds(path: Path) -> float:
+    cmd = [
+        "ffprobe",
+        "-v",
+        "error",
+        "-show_entries",
+        "format=duration",
+        "-of",
+        "csv=p=0",
+        str(path),
+    ]
+    proc = subprocess.run(cmd, check=False, capture_output=True)
+    try:
+        return max(0.0, float(proc.stdout.strip()))
+    except ValueError:
         return 0.0
-    return total_frames / fps
 
 
 def detect_shots(video_path: Path) -> List[Dict[str, Optional[float]]]:
@@ -455,7 +485,11 @@ def extract_audio_for_model(
 # --------------------------------------------------------------------------
 
 
-def build_context(overarching_description: Optional[str], clip_has_audio: bool) -> str:
+def build_context(
+    overarching_description: Optional[str],
+    clip_has_audio: bool,
+    clip_has_video: bool = True,
+) -> str:
     """Assemble the per-request context block that precedes the media."""
     lines: List[str] = []
     if overarching_description:
@@ -466,6 +500,11 @@ def build_context(overarching_description: Optional[str], clip_has_audio: bool) 
     lines.append(
         "Audio input is present." if clip_has_audio else "No audio input is available."
     )
+    if not clip_has_video:
+        lines.append(
+            "No video frames are available; base the analysis on the audio only "
+            "and do not describe visual details you cannot hear."
+        )
     return "\n".join(lines)
 
 
@@ -609,12 +648,23 @@ def plan_shots(
     clip_end: Optional[float],
     shot_detection: Optional[str],
     max_shots: int,
+    clip_has_video: bool = True,
+    audio_window_seconds: Optional[float] = None,
 ) -> List[Dict[str, Optional[float]]]:
-    """Resolve the shot list, defaulting to one shot covering the whole window."""
+    """Resolve the shot list, defaulting to one shot covering the whole window.
+
+    Audio-only input has no shots to detect, so it is split into consecutive
+    `audio_window_seconds` windows instead — otherwise the audio cap would
+    leave everything after the first window unanalysed.
+    """
     start = 0.0 if clip_start is None else float(clip_start)
     end = duration_seconds if clip_end is None else float(clip_end)
 
-    if shot_detection == "test":
+    if not clip_has_video:
+        if shot_detection:
+            debug_log(f"Ignoring shot_detection={shot_detection!r}: input has no video.")
+        shots = plan_audio_windows(start, end, audio_window_seconds)
+    elif shot_detection == "test":
         shots: List[Dict[str, Optional[float]]] = [
             {"start": 0, "end": 20},
             {"start": 20, "end": 40},
@@ -635,6 +685,23 @@ def plan_shots(
         shots = shots[:max_shots]
 
     return shots
+
+
+def plan_audio_windows(
+    start: float, end: float, window_seconds: Optional[float]
+) -> List[Dict[str, Optional[float]]]:
+    """Split `[start, end)` into consecutive windows of at most `window_seconds`."""
+    if not window_seconds or window_seconds <= 0 or end <= start:
+        return [{"start": start, "end": end if end > start else None}]
+
+    windows: List[Dict[str, Optional[float]]] = []
+    cursor = start
+    while cursor < end:
+        window_end = min(cursor + window_seconds, end)
+        windows.append({"start": cursor, "end": window_end})
+        cursor = window_end
+    debug_log(f"Audio-only input: planned {len(windows)} window(s) of <= {window_seconds:.0f}s.")
+    return windows
 
 
 # --------------------------------------------------------------------------
@@ -660,7 +727,13 @@ def analyze(
     primary = load_model(settings.model_id, settings.hf_token)
     duration_seconds = probe_duration_seconds(video_path)
     clip_has_audio = ffprobe_has_audio_stream(video_path)
-    debug_log(f"Duration: {duration_seconds:.2f}s | audio detected: {clip_has_audio}")
+    clip_has_video = ffprobe_has_video_stream(video_path)
+    debug_log(
+        f"Duration: {duration_seconds:.2f}s | audio detected: {clip_has_audio} "
+        f"| video detected: {clip_has_video}"
+    )
+    if not clip_has_audio and not clip_has_video:
+        raise InvalidVideoError(f"No audio or video stream found in: {video_path}")
 
     audio_runner = primary
     if clip_has_audio and not primary.supports_audio:
@@ -677,9 +750,11 @@ def analyze(
         clip_end=clip_end,
         shot_detection=shot_detection,
         max_shots=settings.max_shots,
+        clip_has_video=clip_has_video,
+        audio_window_seconds=settings.audio_max_seconds,
     )
 
-    context_text = build_context(prompts, clip_has_audio)
+    context_text = build_context(prompts, clip_has_audio, clip_has_video)
     prompt_text = build_instructions(language)
 
     narratives: List[Dict[str, Any]] = []
@@ -688,15 +763,18 @@ def analyze(
 
     for index, shot in enumerate(shots):
         debug_log(f"Analyzing shot {index + 1}/{len(shots)}: {video_path}")
-        frames, frame_timestamps, _ = extract_frames(
-            video_path,
-            frames_per_chunk=settings.frames_per_chunk,
-            chunk_seconds=settings.chunk_seconds,
-            max_chunks=settings.max_chunks,
-            max_total_frames=settings.max_total_frames,
-            clip_start=shot["start"],
-            clip_end=shot["end"],
-        )
+        if clip_has_video:
+            frames, frame_timestamps, _ = extract_frames(
+                video_path,
+                frames_per_chunk=settings.frames_per_chunk,
+                chunk_seconds=settings.chunk_seconds,
+                max_chunks=settings.max_chunks,
+                max_total_frames=settings.max_total_frames,
+                clip_start=shot["start"],
+                clip_end=shot["end"],
+            )
+        else:
+            frames, frame_timestamps = [], []
 
         audio_array = extract_audio_for_model(
             video_path,
@@ -746,6 +824,7 @@ def analyze(
         "audio_narrative": audio_narratives,
         "transcript": transcripts,
         "audio_detected": clip_has_audio,
+        "video_detected": clip_has_video,
         "video_duration_seconds": round(duration_seconds, 3),
         "models": {
             "primary_model": primary.model_id,
