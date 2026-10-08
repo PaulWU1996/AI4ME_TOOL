@@ -1,0 +1,71 @@
+<?xml version="1.0" ?>
+<VideoAnalysis>
+  <Metadata>
+    <ProcessingTime>2026-09-18 16:58:53</ProcessingTime>
+    <ProcessingID>decbfe6d-71b9-4753-8dd8-0f91bc80db94</ProcessingID>
+    <EnhancedMerging>true</EnhancedMerging>
+    <SimilarityThreshold>0.75</SimilarityThreshold>
+    <VideoInfo>
+      <filename>sample.mp4</filename>
+      <width>1920</width>
+      <height>1080</height>
+      <fps>30.0</fps>
+      <frame_count>602</frame_count>
+      <duration>20.066666666666666</duration>
+      <frames_per_batch>16</frames_per_batch>
+      <min_frames_per_second>1</min_frames_per_second>
+    </VideoInfo>
+  </Metadata>
+  <ProcessingStats>
+    <video_duration_seconds>20.07</video_duration_seconds>
+    <video_duration_minutes>0.33</video_duration_minutes>
+    <total_process_time_seconds>27.34</total_process_time_seconds>
+    <processing_ratio>1.36</processing_ratio>
+    <frames_processed>80</frames_processed>
+    <batches_processed>5</batches_processed>
+    <keyframes_detected>6</keyframes_detected>
+    <max_ram_usage_mb>3104.45</max_ram_usage_mb>
+  </ProcessingStats>
+  <Segments>
+    <Segment>
+      <StartTime>0.00</StartTime>
+      <EndTime>2.00</EndTime>
+      <Duration>2.0</Duration>
+      <FramesCount>16</FramesCount>
+      <Description>The video begins with a black screen, followed by a scene where a man in a green shirt is pouring a liquid from a green bottle into several small containers on a table. The setting appears to be a laboratory or a similar environment, with various equipment and posters visible in the background. Another person is seen in the background, possibly observing or assisting.</Description>
+      <ProcessTimeSeconds>5.62</ProcessTimeSeconds>
+    </Segment>
+    <Segment>
+      <StartTime>2.00</StartTime>
+      <EndTime>4.00</EndTime>
+      <Duration>2.0</Duration>
+      <FramesCount>16</FramesCount>
+      <Description>A man in a green shirt is cleaning a table with a green spray bottle. A woman in a green jacket is standing behind him.</Description>
+      <ProcessTimeSeconds>3.40</ProcessTimeSeconds>
+    </Segment>
+    <Segment>
+      <StartTime>4.00</StartTime>
+      <EndTime>14.00</EndTime>
+      <Duration>10.0</Duration>
+      <FramesCount>16</FramesCount>
+      <Description>A man and a woman are in a room with various animal enclosures. The man is talking to the woman, who is looking at the enclosures. The man is holding a spray bottle.</Description>
+      <ProcessTimeSeconds>3.85</ProcessTimeSeconds>
+    </Segment>
+    <Segment>
+      <StartTime>14.00</StartTime>
+      <EndTime>17.00</EndTime>
+      <Duration>3.0</Duration>
+      <FramesCount>16</FramesCount>
+      <Description>Woman 01 holds a container with a spider.</Description>
+      <ProcessTimeSeconds>2.63</ProcessTimeSeconds>
+    </Segment>
+    <Segment>
+      <StartTime>17.00</StartTime>
+      <EndTime>20.03</EndTime>
+      <Duration>3.030000000000001</Duration>
+      <FramesCount>16</FramesCount>
+      <Description>The narrator describes the spider's diet and behavior.</Description>
+      <ProcessTimeSeconds>2.60</ProcessTimeSeconds>
+    </Segment>
+  </Segments>
+</VideoAnalysis>

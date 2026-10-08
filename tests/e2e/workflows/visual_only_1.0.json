@@ -1,0 +1,38 @@
+{
+  "workflow": {
+    "name": "visual_only",
+    "version": "1.0"
+  },
+  "settings": {
+    "on_failure": "stop",
+    "retry_backoff": 1.0
+  },
+  "tasks": [
+    {
+      "id": "download",
+      "task": "download_file",
+      "retries": 3,
+      "depends_on": []
+    },
+    {
+      "id": "visual",
+      "task": "process_visual",
+      "service": "visualservice",
+      "depends_on": [
+        "download"
+      ]
+    },
+    {
+      "id": "final",
+      "task": "finalize_results",
+      "kwargs": {
+        "expects": [
+          "visual"
+        ]
+      },
+      "depends_on": [
+        "visual"
+      ]
+    }
+  ]
+}

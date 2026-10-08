@@ -1,0 +1,62 @@
+{
+  "workflow": {
+    "name": "utterance-extent-summarise",
+    "version": "1.0"
+  },
+  "settings": {
+    "on_failure": "stop",
+    "retry_backoff": 1.0
+  },
+  "tasks": [
+    {
+      "id": "download",
+      "task": "download_file",
+      "retries": 3,
+      "depends_on": []
+    },
+    {
+      "id": "extent",
+      "task": "segment_extent",
+      "depends_on": [
+        "download"
+      ]
+    },
+    {
+      "id": "to_text",
+      "task": "transcript_to_text",
+      "depends_on": [
+        "extent"
+      ]
+    },
+    {
+      "id": "summarise",
+      "task": "process_summarise",
+      "service": "transcriptservice",
+      "depends_on": [
+        "to_text"
+      ]
+    },
+    {
+      "id": "tagging",
+      "task": "process_tags",
+      "service": "taggingservice",
+      "depends_on": [
+        "summarise"
+      ]
+    },
+    {
+      "id": "final",
+      "task": "finalize_results",
+      "kwargs": {
+        "expects": [
+          "extent",
+          "summarise",
+          "tagging"
+        ]
+      },
+      "depends_on": [
+        "tagging"
+      ]
+    }
+  ]
+}

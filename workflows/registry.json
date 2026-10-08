@@ -1,0 +1,18 @@
+{
+  "full_pipeline": {
+    "latest": "1.0",
+    "versions": {
+      "1.0": {
+        "path": "/app/workflows/full_pipeline_1.0.json"
+      }
+    }
+  },
+  "full_pipeline_http": {
+    "latest": "1.0",
+    "versions": {
+      "1.0": {
+        "path": "/app/workflows/full_pipeline_http_1.0.json"
+      }
+    }
+  }
+}

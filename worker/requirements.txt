@@ -4,3 +4,4 @@ requests
 xmltodict
 docker
 boto3
+networkx

@@ -1,0 +1,10 @@
+{
+  "visual": {
+    "image": "visualservice:latest",
+    "id": "sha256:b72e20d75b5a509e158c56691718f13ad832df1d551230103cf71028e9a61319"
+  },
+  "audio": {
+    "image": "audioservice:latest",
+    "id": "sha256:ff64da267145b55c938d4d5a844c9a12c1b663efa5d9b361e186c2fea3e10a73"
+  }
+}

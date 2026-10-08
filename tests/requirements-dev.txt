@@ -1,0 +1,5 @@
+# Docker-free test suite for dag/. Install into a venv at the repo root:
+#   python3 -m venv venv && ./venv/bin/pip install -r tests/requirements-dev.txt
+pytest>=8
+networkx
+requests
