@@ -1,464 +1,262 @@
-# CONTAINERIZED MEDIA PROCESSING PIPELINE FOR BBC
+# Media Processing Orchestrator
+
+A distributed workflow orchestrator. A **FastAPI**
+controller registers DAG workflow templates and dispatches each job as a
+Celery canvas; a **Celery** worker executes the nodes against HTTP
+services or local Python scripts, coordinated through **Redis**.
 
 ---
 
-## 1. PROJECT OVERVIEW
-
-A distributed media processing tool designed for BBC creative teams. It integrates audio and visual modality understanding algorithms into a scalable containerized architecture using **FastAPI**, **Celery**, and **Redis**.
-
----
-
-## 2. DIRECTORY STRUCTURE
+## 1. DIRECTORY STRUCTURE
 
 ```bash
 .
 |-- controller
-|   |-- main.py         # FastAPI application & API endpoints
-|   |-- downloader.py   # Support for S3, URL, and Local file ingestion
-|   |-- tasks.py        # Celery task signatures for Producer side
-|   |-- Dockerfile      # Python 3.10-slim base
+|   |-- main.py         # FastAPI app: /workflows, /process, /status
+|   |-- tasks.py        # Celery app configuration (broker + backend)
+|   |-- Dockerfile
+|   |-- requirements.txt
 |-- worker
-|   |-- tasks.py        # Analysis logic & automated cleanup for Consumer side
-|   |-- Dockerfile      # Celery worker configuration
-|-- docker-compose.yml  # Service orchestration for Redis, Controller, Worker
-|-- shared              # Shared volume for temporary media processing
-|   |-- api-data        # Folder storing Sample API request payloads for testing
-|-- weights             # Placeholder for AI model weights
-|   |-- AFWhisper       
-|   |   |-- sound_tower
-|   |-- PALUniEncRdFc3Llama31_8B_s2
-|   |   |-- checkpoint-final
-|   |-- models
-|   |-- ollama          # Ollama model weights for transcript service
-|-- README.md            # Project documentation (this file) 
+|   |-- tasks.py        # Celery tasks: http_call, python_call
+|   |-- consts.py       # Environment configuration
+|   |-- Dockerfile
+|   |-- requirements.txt
+|-- dag
+|   |-- parser.py       # Workflow JSON -> validated DAG (networkx)
+|   |-- compose.py      # DAG -> Celery chain-of-groups canvas
+|-- workflows
+|   |-- registry.json   # job_type -> versions -> file paths
+|   |-- *.json          # Registered workflow templates
+|-- scripts             # ECR build/push helpers
+|-- docs                # Module-level reference documentation
+|-- shared              # Job workspace, mounted at /app/tmp
+|-- docker-compose.yml  # redis, controller, worker, autoheal
 ```
 
 ---
 
-## 3. KEY FEATURES
-
-- **Universal Ingestion**  
-  Support for S3, HTTP/HTTPS, and local file paths  
-
-- **Multiple Job Types**  
-  Supports `full`, `audio_only`, `visual_only`, and `summarise` pipelines via a single endpoint  
-
-- **Automated Cleanup**  
-  The worker automatically deletes `/app/tmp/<job_id>` once processing is finalized to prevent disk overflow  
-
-- **Industrial Stability**  
-  Optimized with:
-  - Visibility timeout (1 hour)  
-  - Strict concurrency limits  
-  - Late acknowledgments  
-  - Designed for long-running (30min+) AI workloads on GPUs (e.g., A100)
-
-- **Containerized Architecture**  
-  Each component (Controller, Worker, Redis) runs in its own Docker container for modularity and scalability
-
-- **Automatic First Aid**  
-  The system is designed to handle and recover from common failure scenarios (e.g., task timeouts, worker crashes) without manual intervention
-
----
-
-## 4. GETTING STARTED
+## 2. GETTING STARTED
 
 ### Prerequisites
 
-- Docker  
-- Docker Compose  
-- (Optional) AWS credentials for S3 access  
+- Docker + Docker Compose
+- AWS credentials (only for building/pushing images to ECR)
 
-### Deployment
+### Environment
 
-1. Copy the weights folder to the appropriate location following the structure outlined above. (Note: The shared volume and the api-data folder are shown above but you need to mannually create them and put the corresponding place following the stracture above.)
-
-2. Load the Docker images for the audio and visual services, respectively:
+Create a `.env` in the repo root:
 
 ```bash
-docker load -i audioservice.tar
-docker load -i narrative-api.tar
+AWS_ACCOUNT_ID=123456789012
+AWS_REGION=eu-west-1
+ECR_REPO=moments
 ```
-- The narrative-api.tar is the image for the visual service and produced by Asmar. (No test on his image yet, but it should work as long as the entrypoint is correct and the model weights are in place).
 
-- The audioservice.tar is the image for the audio service and produced by Tony (audio llm) and Paul (plugin wrapper and docker design). It has been tested and works with the current codebase.
-
-3. Load the Docker image for the transcript service:
+### Run
 
 ```bash
-docker load -i llmtoolsservice.tar
+docker compose up -d
 ```
 
-4. Start the entire stack using the resource-aware start script:
-```bash
-# All on-demand services cold-start per job (default, historical behavior)
-./scripts/start.sh
-
-# Keep specific GPU services resident across jobs (see "Service Modes" below)
-./scripts/start.sh --keepalive audioservice,llmtoolsservice
-```
-There will be several services starting up, including Redis, the Controller API, and the Worker. Services not selected with `--keepalive` start on-demand when a job requires them and stop afterward. The Controller and Worker will connect to Redis for task orchestration.
-
-Once compose completed, the TOOL API will be available at:
-
-```
-http://localhost:9000
-```
+The API is then available at `http://localhost:9000`. Redis listens on
+`6379` (Redis Insight GUI on `8001`).
 
 ---
 
-### Service Modes: Cold-start vs Keepalive
+## 3. API
 
-By default, `audioservice`, `visualservice`, and `llmtoolsservice` are **cold-started**: the worker starts each container only when a job needs it and stops it again once the job finishes. This keeps host resource usage minimal but pays a model-load/health-check cost (up to ~5.5 minutes) on every single job.
+### `POST /workflows` — register a workflow template
 
-If your host has enough spare GPU/RAM capacity, you can instead keep one or more of these services **resident** across jobs ("keepalive"), avoiding the per-job startup cost.
-
-```bash
-# Keep audioservice and llmtoolsservice running; visualservice still cold-starts per job
-./scripts/start.sh --keepalive audioservice,llmtoolsservice
-```
-
-How it works (`scripts/start_services.py`, invoked by `scripts/start.sh`):
-
-1. **Registry** — `config/services.json` declares each on-demand service's estimated `vram_mb`/`ram_mb` and whether it supports keepalive. Add a new on-demand service by adding one entry here.
-2. **Static pre-check** — before touching Docker, sums the declared resource estimates for your `--keepalive` selection and compares against detected host GPU/RAM capacity (`nvidia-smi`, `free -m`). If the selection is obviously too large, the script aborts immediately with no containers started.
-3. **Measured pass** — starts each keepalive-selected service one at a time, waits for it to become healthy, and measures its *actual* VRAM delta. If real cumulative usage would exceed a safety margin of host capacity, the script stops what it started and aborts, reporting the real numbers. On success, the measured values are written back into `config/services.json` so future runs use observed reality instead of stale estimates.
-4. The resolved mode selection is written to `shared/service_modes.json`. The worker reads this file once at startup — `start_service`/`stop_service` skip the start/stop cycle for any service marked `keepalive`, and automatically fall back to normal cold-start recovery if a keepalive container isn't actually healthy when a job needs it.
-
-Services omitted from `--keepalive` default to `coldstart` (today's default behavior).
-
-**Note:** `scripts/start_services.py` runs on the host (not inside a container) — it needs `docker`, the `docker` Python package, and (for GPU services) `nvidia-smi` available on the host running `docker compose`.
-
----
-
-### API Usage
-
-#### Start Processing
-
-- **Endpoint:** `POST /process` (JSON body)
+The request body **is** the workflow document (see §4). It is validated
+(acyclic, all `depends_on` declared, unique ids), written to
+`workflows/<name>_<version>.json`, and recorded in `registry.json`.
 
 ```bash
-# Full pipeline (default)
-curl -X POST "http://localhost:9000/process" \
-  -H "Content-Type: application/json" \
-  -d '{"path": "/app/data/video.mp4"}'
-
-# Runs a specific registered workflow (register first, see §5)
-curl -X POST "http://localhost:9000/process" \
-  -H "Content-Type: application/json" \
-  -d '{"path": "/app/data/video.mp4", "job_type": "full"}'
-
-# With callback and prompts
-curl -X POST "http://localhost:9000/process" \
-  -H "Content-Type: application/json" \
-  -d '{"path": "https://example.com/video.mp4", "job_type": "full", "callback_url": "https://your-server/callback", "prompts": "describe the scene"}'
-```
-
-# media-selector pipeline (default)
-```bash
-curl -X POST "http://localhost:9000/process" \
-  -H "Content-Type: application/json" \
-  -d '{ "job_type": "content-avoidance", "programme_id": "m002vqlg", "start_ms": 0, "duration_ms": 60000 }'
-```
-
-**Request fields:**
-
-| Field | Type | Default | Description |
-|---|---|---|---|
-| `path` | string | required | Media source: local path, HTTP/HTTPS URL, or S3 URI |
-| `job_type` | string | `"full"` | Name of a registered DAG workflow (see `POST /workflows`) |
-| `prompts` | string | null | Custom analysis prompt passed to services |
-| `callback_url` | string | null | Webhook to POST results to on completion |
-
-Returns a `job_id` immediately. If `callback_url` is provided, results are also POSTed there when complete.
-
-Once the request is received, the Controller will:
-1. Look up the registered workflow for `job_type` (optionally pinned by `version`) and generate a unique `job_id`
-2. Translate the workflow into a single Celery `chain` of layer groups (`dag/compose.py`) and enqueue it
-3. Return `{"status": "submitted", "job_id": "...", "job_type": "..."}` immediately
-
-Note: The outputs (audio and visual analysis results, as well the task info) will be saved in the shared volume workspace under `/app/tmp/{job_id}/` before being returned to the client or sent to the callback URL. You can also check the outputs on the host machine by navigating to the corresponding directory in the shared volume (e.g., `/your/path/to/shared_vol/{job_id}/`) while the processing is still running or after it has completed. This can be useful for debugging or verifying intermediate results.
-
-
----
-
-#### Check Status & Get Results
-
-- **Endpoint:** `GET /status/{job_id}`
-
-```bash
-curl http://localhost:9000/status/<your_job_id>
-```
-
-Returns combined JSON results once `is_ready` is `true`.
-
----
-
-## 5. TASK ORCHESTRATION DETAILS
-
-Jobs dispatch through **registered DAG workflows**. `POST /workflows` validates and permanently registers a workflow template (name + version from its body); a subsequent `POST /process` with `job_type=<name>` runs the workflow's `latest` version (or the one pinned by `version`) by translating it into a single Celery canvas — a `chain` of topological layers, sibling nodes as a parallel `group` (`dag/compose.py`, running in the controller).
-
-```bash
-# Register a workflow template, then run it
 curl -X POST http://localhost:9000/workflows \
-  -H 'Content-Type: application/json' \
-  --data-binary @workflows/full_1.0.json
+  -H "Content-Type: application/json" \
+  --data-binary @workflows/content-avoidance_1.0.json
+```
 
+A name may hold several versions; `latest` always points at the most
+recently registered one. Re-registering an existing name+version is a
+`400`.
+
+### `POST /process` — submit a job
+
+```bash
 curl -X POST http://localhost:9000/process \
-  -H 'Content-Type: application/json' \
-  -d '{"path": "/app/data/video.mp4", "job_type": "full"}'
+  -H "Content-Type: application/json" \
+  -d '{
+    "job_type": "content-avoidance",
+    "payload": {"programme_id": "m002vqlg", "start_ms": 0, "duration_ms": 60000}
+  }'
 ```
 
-Eight workflow templates ship pre-registered in `workflows/registry.json`
-(mount `./workflows` into the containers at `/app/workflows`):
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `payload` | object | yes | Input passed to the first node of the workflow |
+| `job_type` | string | yes | Name of a registered workflow |
+| `version` | string | no | Pin a version; defaults to `latest` |
+| `run_at_ms` | int | no | Epoch ms to schedule the job (max 1h ahead) |
 
-- `full` — `download` → `visual` → `audio` → `final` — expects audio + visual
-- `full_http` — `download` → parallel http `visual`/`audio`, no terminal node
-- `audio_only` — `download` → `audio` → `final`
-- `visual_only` — `download` → `visual` → `final`
-- `tagging` — `download` → `transcript` → `tagging` → `final`
-- `summarise` — `download` → `transcript` → `summarise` → `tagging` → `final`
-- `speaker-extent-summarise` — adds `extent` (speaker) before `transcript`
-- `utterance-extent-summarise` — adds `extent` (segment) before `transcript`
+Extra top-level fields are allowed and become part of the job context
+available to nodes declaring `call: "kwargs"`.
 
-A workflow template declares its nodes with `id`, `task` (a function in `worker/tasks.py`, or the HTTP driver via `url`), `depends_on`, and optional `service` / `retries`. Node input is declarative, never keyed on a task's name:
+Returns immediately:
 
-| Node attribute | Meaning |
+```json
+{"status": "submitted", "job_id": "…", "job_type": "content-avoidance"}
+```
+
+### `GET /status/{job_id}` — poll for the result
+
+```bash
+curl http://localhost:9000/status/<job_id>
+```
+
+```json
+{
+  "job_id": "…",
+  "status": "SUCCESS",
+  "is_ready": true,
+  "data": { … },
+  "message": "Task completed successfully"
+}
+```
+
+`status` is a Celery state (`PENDING`, `PROGRESS`, `STARTED`,
+`SUCCESS`, `FAILURE`). Unknown or expired ids return `404`. `data`
+holds the final node's return value once the job is ready.
+
+---
+
+## 4. WORKFLOW FORMAT
+
+A workflow is a JSON document:
+
+```json
+{
+  "workflow": { "name": "content-avoidance", "version": "1.0" },
+  "tasks": [ … ]
+}
+```
+
+Each entry in `tasks` declares a node:
+
+| Field | Meaning |
 |---|---|
-| `call: "kwargs"` | Node reads a job-context slice instead of the merged predecessor payload (`inject` below). Default is the merged-payload convention. |
-| `inject: [...]` | For `call: "kwargs"` nodes — which job-context keys (`path`, `prompts`, `job_id`, `job_type`, `callback_url`, ...) to pass in; job context wins over template `kwargs` defaults. |
-| `requires: [...]` | For `call: "kwargs"` nodes — keys that must resolve at pre-flight, or the job fails fast. |
-| `terminal: true` | The node whose output is the job's `/status` result (a workflow's summary/finalize step). |
-| `service` / `retries` | On-demand service this node's worker starts/stops around the node (per-worker lifecycle manager in `worker/utils.py`); node-level retry count (honored on `download_file` by its task-level `autoretry_for`). |
-| `driver: "python"` | Runs a script from `services/`. The script receives the predecessor payload as JSON on stdin and returns one JSON document on stdout. `script` is relative to `/app/services`, so a node names its module (`transcript-tools/transcript_to_text.py`); `params` are static input overrides, `timeout` is in seconds, and `merge` preserves the payload for the next node. |
+| `id` | Unique node id |
+| `depends_on` | Ids of predecessor nodes |
+| `driver` | `"http"` or `"python"` (see below) |
+| `call` | `"kwargs"` to read a slice of the job context instead of the predecessor's result |
+| `inject` | For `call: "kwargs"` — job-context keys to pass in |
+| `requires` | For `call: "kwargs"` — keys that must be present or the build fails |
+| `kwargs` | Static arguments merged under the injected keys |
 
-Python scripts run inside the worker, so workflow registration must stay a trusted, internal operation. The worker has host mounts and Docker socket access; do not expose `POST /workflows` to untrusted callers.
+### HTTP driver
 
-A script receives the predecessor payload on stdin, so it has no access to the worker's own modules or constants. Anything it needs beyond the payload must travel in that payload: `download_file` returns `file_path`, `video_path`, `shared_path`, `job_id`, and `prompts`, and a node with `merge: true` passes them on to the next node.
-
-For example, a transcript step can be written as:
-
-```json
-{ "id": "transcript", "driver": "python",
-  "script": "transcript-tools/transcript_to_text.py", "merge": true,
-  "depends_on": ["download"] }
-```
-
-For example, `workflows/full_1.0.json`:
+Runs the generic `tasks.http_call` task. The predecessor's result
+arrives positionally as the request payload.
 
 ```json
-{ "id": "download", "task": "download_file", "call": "kwargs",
-  "inject": ["path", "prompts", "job_id"], "requires": ["path"] },
-{ "id": "visual", "task": "process_visual", "service": "visualservice",
-  "depends_on": ["download"] },
-{ "id": "audio", "task": "process_audio", "service": "audioservice",
-  "depends_on": ["visual"] },
-{ "id": "final", "task": "finalize_results", "call": "kwargs",
-  "inject": ["job_id", "job_type", "callback_url"], "terminal": true,
-  "kwargs": { "expects": ["audio", "visual"] },
-  "depends_on": ["visual", "audio"] }
+{
+  "id": "audio-transcription",
+  "driver": "http",
+  "url": "http://localhost:9004/process",
+  "method": "POST",
+  "headers": {},
+  "timeout": 300,
+  "body": { "storage_type": "mongodb" },
+  "merge": true
+}
 ```
 
-`finalize_results` merges the job's output JSON files from the shared volume, writes `task_info.txt`, deletes the raw video on success, and optionally POSTs to `callback_url`. Its success criteria are declarative via `kwargs.expects`; a workflow must declare `expects`, or the job fails at the final node.
+`body` is merged into the payload for this call only. With
+`merge: true` the response is merged over the payload
+(`{**payload, **response}`) so downstream nodes keep `job_id` and the
+rest of the context; otherwise the response replaces it.
 
-The full workflow is demonstrated in the following diagram:
+### Python driver
 
-```
-┌─────────────────────────────────────────────────────────────────────┐
-│                           CLIENT                                    │
-│  POST /process  {path, job_type, prompts, callback_url}             │
-└───────────────────────────┬─────────────────────────────────────────┘
-                            │ returns immediately
-                            │ {"status":"submitted","job_id":"..."}
-                            ▼
-┌─────────────────────────────────────────────────────────────────────┐
-│                     CONTROLLER  :9000                               │
-│  FastAPI — looks up registered workflow, generates job_id, builds   │
-│  the Celery canvas (dag/compose.py), enqueues via .apply_async()    │
-└───────────────────────────┬─────────────────────────────────────────┘
-                            │ enqueue chain(*layers)
-                            ▼
-┌─────────────────────────────────────────────────────────────────────┐
-│                     REDIS  :6379                                    │
-│  Celery broker + result backend                                     │
-│                                                                     │
-│  Queue:  [job_A] [job_B] [job_C] ...   ← jobs parallel in queue    │
-└───────────────────────────┬─────────────────────────────────────────┘
-                            │ worker picks up one job at a time
-                            ▼
-┌─────────────────────────────────────────────────────────────────────┐
-│                      WORKER  (Celery)                               │
-│                                                                     │
-│  One chain(*steps), one step per topological layer. Sibling nodes   │
-│  in a layer form a group and run in parallel (full_http's two http  │
-│  nodes today); a group followed by a later layer is auto-upgraded   │
-│  to a chord (fan-in). The default full workflow is a pure chain:    │
-│  download → visual → audio → final.                                 │
-│                                                                     │
-│  ① download_file   (immutable kwargs)                              │
-│     S3 / HTTP(S) / local → /app/tmp/{job_id}/{filename}            │
-│            │                                                        │
-│            ▼                                                        │
-│  ② process_visual  (starts visualservice → /analyze)                │
-│     saves {name}_visual_output.json                                 │
-│            │                                                        │
-│            ▼                                                        │
-│  ③ process_audio  (starts audioservice → /process_audio/)           │
-│     saves {name}_audio_output.json                                  │
-│            │                                                        │
-│            ▼                                                        │
-│  ④ finalize_results  (immutable, terminal node)                    │
-│     merges audio + visual JSON from shared volume                   │
-│     evaluates success per kwargs.expects                            │
-│     writes task_info.txt                                            │
-│     deletes raw video on success                                    │
-│     POST callback_url (if provided)                                 │
-│     stores final_output in Redis under job_id                       │
-└───────────────────────────┬─────────────────────────────────────────┘
-                            │
-              ┌─────────────┴──────────────┐
-              │                            │
-              ▼                            ▼
-  GET /status/{job_id}           callback_url  ← POST final_output
-  polls Redis AsyncResult
-  returns data when ready
+Runs the generic `tasks.python_call` task: a script below the worker's
+script root, fed the predecessor result as JSON on stdin, expected to
+print one JSON document to stdout.
 
-┌─────────────────────────────────────────────────────────────────────┐
-│                   SHARED VOLUME  ./shared → /app/tmp                │
-│                                                                     │
-│  /app/tmp/{job_id}/                                                 │
-│    ├── video.mp4                  (deleted on success)              │
-│    ├── video_visual_output.json                                     │
-│    ├── video_audio_output.json                                      │
-│    └── task_info.txt                                                │
-└─────────────────────────────────────────────────────────────────────┘
+```json
+{
+  "id": "transcript",
+  "driver": "python",
+  "script": "transcript-tools/transcript_to_text.py",
+  "params": { "key": "value" },
+  "timeout": 300,
+  "merge": true,
+  "depends_on": ["download"]
+}
 ```
 
-Note: The /shared/{job_id}/ directory will not be automatically deleted by orchestrator (reddis, controller, worker and autoheal). The reason is that we want to keep the output json files for the client and wait confirmation of the final export method (e.g. push to database, save local file, send to callback url).
----
+`script` must be a relative path inside `PYTHON_SCRIPT_ROOT` (no `..`).
+`params` overrides payload keys, `timeout` bounds the subprocess, and
+`merge` preserves the payload for the next node. The script runs as a
+bare subprocess — it imports nothing from the worker, so everything it
+needs must arrive in the payload.
 
-## 6. INDIVIDUAL SERVICE COMPONENT TESTING
+> **Note:** no service scripts are shipped in this repo yet; the worker
+> image does not currently contain a `/app/services` tree, so `python`
+> driver nodes need that directory mounted/added first.
 
-For the purpose of testing individual service components (audio and visual service) without Docker Compose, you can use the following commands. 
+### Job context
 
-### 6.1  Audio Service Testing
-
-Start the audio service container with the appropriate environment variables and volume mounts:
-```bash
-docker run -d \
-  --name audioservice \
-  --gpus all \
-  -e MODEL_PATH="/app/weights/checkpoint-final" \
-  -e SHARED_PATH="/app/tmp" \
-  -v /your/path/to/PALUniEncRdFc3Llama31_8B_s2/checkpoint-final:/app/weights/checkpoint-final \
-  -v /your/path/to/shared_vol:/app/tmp \
-  -p 9002:8000 \
-  -w /app \
-  audioservice:latest \
-  python3 -m uvicorn src.audio_entry:app --host 0.0.0.0 --port 8000
-```
-Once service is ready, send a test request to the audio service:
-```bash
-curl -X POST "http://localhost:9002/process?path=https://www.w3schools.com/html/mov_bbb.mp4"
-```
-You can also check the service status by sending a GET request to the status endpoint:
-```bash
-curl -X POST "http://localhost:9002/health"
-```
-
-### 6.2  Visual Service Testing
-
-Docker running command for the visual service.
-```bash
-# Load image
-docker load -i narrative-api.tar
-
-# Create data directory for API keys
-mkdir -p ~/narrative-api-data
-
-# Run
-docker run -d \
-  --runtime=nvidia \
-  -e NVIDIA_VISIBLE_DEVICES=all \
-  -e ADMIN_KEY=your-admin-key \
-  --name narrative-api \
-  -v /path/to/weights:/app/models \
-  -v ~/narrative-api-data:/app/data \
-  -p 8000:8000 \
-  narrative-api
-
-# Check it is running (wait 1-2 min for model to load)
-curl http://localhost:8000/health
-```
-
-Once the service is running, you can generate the api-key following:
-```bash
-curl -X POST http://localhost:8000/api/keys/generate \
-  -H "X-Admin-Key: change-me-in-production" \
-  -H "Content-Type: application/json" \
-  -d '{"client_name": "client-ai4me", "expires_in_days": 365}'
-```
-
-Save the api_key value from the response — it is shown only once.
-
-And then you can send a test request to the visual service:
-```bash
-Analyse a video
-curl -X POST http://localhost:8000/analyze \
-  -H "X-API-Key: sk_your-api-key" \
-  -F "video=@/path/to/video.mp4" \
-  --output result.xml
-```
-
-Supported formats: mp4, avi, mov, mkv, webm
+The job context is the `/process` request (`payload`, `job_type`,
+`version`, `run_at_ms` plus any extra fields) merged with `job_id`.
+Nodes using `call: "kwargs"` read from it; everything else receives the
+predecessor's result positionally.
 
 ---
 
-### Appendix: Commands for 
-reddis start command:
-```
-apptainer run --env LC_ALL=C redis.sif \
-  redis-server \
-  --port 6379 \
-  --protected-mode no \
-  --save "" \
-  --appendonly no \
-  --dir /tmp \
-  --logfile ""
-```
+## 5. EXECUTION MODEL
 
-redis check command:
-```
-apptainer exec redis.sif redis-cli -p 6379 ping
-```
+`dag/parser.py` validates the workflow into a `networkx.DiGraph`;
+`dag/compose.py` turns it into a single Celery canvas:
 
-controller start command:
-```
-apptainer exec \
-  --env SHARED_PATH="/mnt/fast/nobackup/scratch4weeks/pw0036/Compose/temp_data" \
-  --env REDIS_HOST="127.0.0.1" \
-  --pwd /app \
-  controller.sif \
-  uvicorn main:app --host 0.0.0.0 --port 9000
-```
+1. Every node is assigned to exactly one layer
+   (`layer = 1 + max(predecessors' layers)`, roots at 0).
+2. Layers are chained in order; a layer with several nodes becomes a
+   parallel `group`, a single-node layer is the task itself.
 
-worker start command:
-```
-apptainer exec \
-  --env SHARED_PATH="/mnt/fast/nobackup/scratch4weeks/pw0036/Compose/temp_data" \
-  --env REDIS_HOST="127.0.0.1" \
-  --pwd /app \
-  worker.sif \
-  celery -A tasks worker --loglevel=info --pool=solo
-```
-
-curl test command:
-```
-curl -X POST "http://127.0.0.1:9000/process" \
-  -H "Content-Type: application/json" \
-  -d '{"path": "https://www.w3schools.com/html/mov_bbb.mp4"}'
-```
+Running the chain top-to-bottom guarantees dependencies finish before a
+node starts, and Celery upgrades a group followed by another step to a
+fan-in automatically.
 
 ```
-apptainer run --nv --env MODEL_PATH="/mnt/fast/nobackup/scratch4weeks/pw0036/Compose/weights/PALUniEncRdFc3Llama31_8B_s2/checkpoint-final" --env SHARED_PATH="/mnt/fast/nobackup/scratch4weeks/pw0036/samples"  --pwd app audioservice@1.sif python3 -m uvicorn src.audio_entry:app --host 0.0.0.0 --port 8000
+POST /process ──> CONTROLLER ──> REDIS ──> WORKER
+                  builds the       queue      executes nodes:
+                  canvas from      jobs       http_call / python_call
+                  the workflow
+                        │
+                        ▼
+               GET /status/{job_id}  <──  Celery result backend
 ```
+
+---
+
+## 6. DEPLOYMENT
+
+Images are built and pushed to ECR, then referenced by
+`docker-compose.yml`:
+
+```bash
+./scripts/deploy-all.sh          # both images
+./scripts/deploy-controller.sh   # or individually
+./scripts/deploy-worker.sh
+docker compose up -d
+```
+
+`scripts/lib-ecr.sh` holds the shared helpers (env loading, ECR login,
+repository creation, build+push).
+
+---
+
+## 7. DOCUMENTATION
+
+- `docs/DAG_ENGINE_PARSER.md` — reference for `dag/parser.py` and
+  `dag/compose.py`

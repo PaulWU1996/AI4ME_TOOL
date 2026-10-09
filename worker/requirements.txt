@@ -1,9 +1,3 @@
 celery
 redis
 requests
-xmltodict
-docker
-boto3
-networkx
-av
-numpy

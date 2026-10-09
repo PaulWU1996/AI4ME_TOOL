@@ -1,11 +1,7 @@
-import glob
 import json
-import os
-import shutil
 import subprocess
 import sys
 from pathlib import Path
-from urllib.parse import parse_qs, urlparse
 
 import requests
 from celery import Celery
@@ -14,11 +10,6 @@ from consts import (
     python_script_root,
     redis_host,
     redis_port,
-    shared_path,
-)
-from utils import (
-    load_json_file,
-    save_to_shared_disk,
 )
 
 app = Celery(
