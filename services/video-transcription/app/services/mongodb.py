@@ -50,13 +50,12 @@ def ensure_available() -> None:
     get_mongodb_client()
 
 
-def find_scenes(program_id: str, window_start: float, window_end: float | None) -> list[dict]:
+def find_scenes(program_id: str, window_start: float, window_end: float | None, collection_name: str = "scene_classification") -> list[dict]:
     """Scenes of `program_id` overlapping `[window_start, window_end)`, in programme seconds.
 
     `window_end=None` means the window runs to the end of the programme.
     """
     client = get_mongodb_client()
-    collection_name = os.environ.get("MONGO_SCENES_COLLECTION", "scenes")
     print(f"using collection {collection_name}")
     collection = client.get_default_database()[collection_name]
     query: dict = {"programme_id": program_id, "end_time": {"$gt": window_start}}
