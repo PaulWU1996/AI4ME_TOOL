@@ -50,14 +50,14 @@ def ensure_available() -> None:
     get_mongodb_client()
 
 
-def find_scenes(programme_id: str, window_start: float, window_end: float | None) -> list[dict]:
-    """Scenes of `programme_id` overlapping `[window_start, window_end)`, in programme seconds.
+def find_scenes(program_id: str, window_start: float, window_end: float | None) -> list[dict]:
+    """Scenes of `program_id` overlapping `[window_start, window_end)`, in programme seconds.
 
     `window_end=None` means the window runs to the end of the programme.
     """
     client = get_mongodb_client()
     collection = client.get_default_database()[os.environ.get("MONGO_SCENES_COLLECTION", "scenes")]
-    query: dict = {"programme_id": programme_id, "end_time": {"$gt": window_start}}
+    query: dict = {"programme_id": program_id, "end_time": {"$gt": window_start}}
     if window_end is not None:
         query["start_time"] = {"$lt": window_end}
     projection = {"_id": 0, "scene_id": 1, "start_time": 1, "end_time": 1}
@@ -65,7 +65,7 @@ def find_scenes(programme_id: str, window_start: float, window_end: float | None
 
 
 def store_scene_results(docs: list[dict], collection_name: str = "gemma_audio_analysis") -> None:
-    """Upsert one doc per (programme_id, scene_id).
+    """Upsert one doc per (program_id, scene_id).
 
     Mongo generates the ObjectId `_id` on first insert; re-running a job
     replaces the scene's doc instead of duplicating it.
@@ -77,7 +77,7 @@ def store_scene_results(docs: list[dict], collection_name: str = "gemma_audio_an
     collection.bulk_write(
         [
             ReplaceOne(
-                {"programme_id": doc["programme_id"], "scene_id": doc["scene_id"]},
+                {"program_id": doc["program_id"], "scene_id": doc["scene_id"]},
                 doc,
                 upsert=True,
             )

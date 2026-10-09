@@ -32,8 +32,8 @@ class ProcessRequest(BaseModel):
     job_type: Literal["gemma"] = "gemma"
     # Either a file already on the shared volume, or a programme to fetch audio for.
     video_path: str | None = None # rename to media_path
-    programme_id: str | None = None
-    start_ms: int | None = None
+    program_id: str | None = None
+    start_time_ms: int | None = None
     duration_ms: int | None = None
     prompts: Optional[str] = None
     language: str = "en"
@@ -45,8 +45,8 @@ class ProcessRequest(BaseModel):
 
     @model_validator(mode="after")
     def _one_source(self):
-        if bool(self.video_path) == bool(self.programme_id):
-            raise ValueError("Provide exactly one of `video_path` or `programme_id`")
+        if bool(self.video_path) == bool(self.program_id):
+            raise ValueError("Provide exactly one of `video_path` or `program_id`")
         return self
 
 
@@ -74,25 +74,25 @@ class ModelsInfo(BaseModel):
 class ProcessResponse(BaseModel):
     job_id: str
     job_type: Literal["gemma"]
-    programme_id: str | None = None
+    program_id: str | None = None
     scenes: list[SceneResult]
     models: ModelsInfo
     processing_time_ms: int
 
 
-def _download_audio(programme_id: str, output_path: Path, start_ms: int | None, duration_ms: int | None) -> Path:
+def _download_audio(program_id: str, output_path: Path, start_time_ms: int | None, duration_ms: int | None) -> Path:
     from app.stream_decoder import fetch_dash_stream_audio
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     fetch_dash_stream_audio(
-        programme_id,
-        start_time_ms=start_ms or 0,
+        program_id,
+        start_time_ms=start_time_ms or 0,
         look_ahead_ms=duration_ms or sys.maxsize,
         output_path=str(output_path),
     )
     if not output_path.is_file():
-        raise RuntimeError(f"No audio written for programme {programme_id}")
-    logger.info("audio ready | programme_id=%s path=%s", programme_id, output_path)
+        raise RuntimeError(f"No audio written for programme {program_id}")
+    logger.info("audio ready | program_id=%s path=%s", program_id, output_path)
     return output_path
 
 
@@ -205,13 +205,13 @@ def _write_outputs(job_id: str, media_stem: str, response: ProcessResponse) -> P
 @router.post("/process", response_model=ProcessResponse, response_model_exclude_none=True)
 async def process(req: ProcessRequest):
     logger.info(
-        "job received | job_id=%s job_type=%s language=%s video_path=%s programme_id=%s start_ms=%s duration_ms=%s",
+        "job received | job_id=%s job_type=%s language=%s video_path=%s program_id=%s start_time_ms=%s duration_ms=%s",
         req.job_id,
         req.job_type,
         req.language,
         req.video_path,
-        req.programme_id,
-        req.start_ms,
+        req.program_id,
+        req.start_time_ms,
         req.duration_ms,
     )
 
@@ -220,7 +220,7 @@ async def process(req: ProcessRequest):
         raise HTTPException(status_code=503, detail="Model is not loaded yet")
 
     # Scene lookup needs Mongo whatever the storage type.
-    if req.storage_type == "mongodb" or req.programme_id:
+    if req.storage_type == "mongodb" or req.program_id:
         try:
             await run_in_threadpool(mongodb.ensure_available)
         except Exception as exc:
@@ -231,36 +231,36 @@ async def process(req: ProcessRequest):
             )
 
     # Window of programme time covered by the downloaded audio, in seconds.
-    window_start = (req.start_ms or 0) / 1000
+    window_start = (req.start_time_ms or 0) / 1000
     window_end = window_start + req.duration_ms / 1000 if req.duration_ms else None
 
-    if req.programme_id:
+    if req.program_id:
         try:
             scenes = await run_in_threadpool(
-                mongodb.find_scenes, req.programme_id, window_start, window_end
+                mongodb.find_scenes, req.program_id, window_start, window_end
             )
         except Exception as exc:
-            logger.exception("scene lookup failed | job_id=%s programme_id=%s", req.job_id, req.programme_id)
-            raise HTTPException(status_code=503, detail=f"Could not fetch scenes for {req.programme_id}: {exc}")
+            logger.exception("scene lookup failed | job_id=%s program_id=%s", req.job_id, req.program_id)
+            raise HTTPException(status_code=503, detail=f"Could not fetch scenes for {req.program_id}: {exc}")
         if not scenes:
             raise HTTPException(
                 status_code=404,
-                detail=f"No scenes for {req.programme_id} between {window_start}s and {window_end or 'end'}s",
+                detail=f"No scenes for {req.program_id} between {window_start}s and {window_end or 'end'}s",
             )
         logger.info("scenes found | job_id=%s count=%d", req.job_id, len(scenes))
 
-        dest = _shared_path() / req.job_id / f"{req.programme_id}.wav"
+        dest = _shared_path() / req.job_id / f"{req.program_id}.wav"
         try:
             media_path = await run_in_threadpool(
                 _download_audio,
-                req.programme_id,
+                req.program_id,
                 dest,
-                req.start_ms,
+                req.start_time_ms,
                 req.duration_ms
             )
         except Exception as exc:
-            logger.exception("audio download failed | job_id=%s programme_id=%s", req.job_id, req.programme_id)
-            raise HTTPException(status_code=502, detail=f"Could not fetch audio for {req.programme_id}: {exc}")
+            logger.exception("audio download failed | job_id=%s program_id=%s", req.job_id, req.program_id)
+            raise HTTPException(status_code=502, detail=f"Could not fetch audio for {req.program_id}: {exc}")
     else:
         media_path = _resolve_media_path(req.video_path or '')
         # No programme, so no scenes: treat the requested window of the file as one scene.
@@ -278,7 +278,7 @@ async def process(req: ProcessRequest):
         async with _analysis_lock:
             for scene in scenes:
                 scene_id = scene["scene_id"]
-                if req.programme_id:
+                if req.program_id:
                     # Clip to the downloaded window, then cut the scene out of the
                     # wav, which starts at `window_start` in programme time.
                     start = max(float(scene["start_time"]), window_start)
@@ -326,7 +326,7 @@ async def process(req: ProcessRequest):
                 models = result["models"]
                 scene_docs.append(
                     {
-                        "programme_id": req.programme_id,
+                        "program_id": req.program_id,
                         "scene_id": scene_id,
                         "start_time": start,
                         "end_time": end,
@@ -357,9 +357,9 @@ async def process(req: ProcessRequest):
     response = ProcessResponse(
         job_id=req.job_id,
         job_type=req.job_type,
-        programme_id=req.programme_id,
+        program_id=req.program_id,
         scenes=[
-            SceneResult(**{k: v for k, v in doc.items() if k != "programme_id"})
+            SceneResult(**{k: v for k, v in doc.items() if k != "program_id"})
             for doc in scene_docs
         ],
         models=models,
