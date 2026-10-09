@@ -60,7 +60,10 @@ curl -X POST http://localhost:9004/process \
 | Field | Type | Required | Description |
 |---|---|---|---|
 | `job_id` | string | yes | Orchestrator-assigned job identity; also names the output directory |
-| `video_path` | string | yes | Path to the video **relative to the shared volume root**, conventionally `"{job_id}/{filename}"`. Absolute paths are rejected |
+| `video_path` | string | one of `video_path` / `programme_id` | Path to the video **relative to the shared volume root**, conventionally `"{job_id}/{filename}"`. Absolute paths are rejected |
+| `programme_id` | string | one of `video_path` / `programme_id` | Programme to fetch DASH audio for; written to `shared/{job_id}/{programme_id}.wav` and analysed |
+| `start_ms` | int | no | Offset into the programme to start fetching audio from (default `0`). Only used with `programme_id` |
+| `duration_ms` | int | no | How much audio to fetch, in ms. Defaults to the rest of the programme. Only used with `programme_id` |
 | `job_type` | string | no | Echoed back in the response. Defaults to `"gemma"`; nothing branches on it |
 | `prompts` | string | no | The programme's description, given to the model as context |
 | `language` | string | no | Output language, e.g. `"en"`, `"cy"` (default `"en"`) |
@@ -68,22 +71,29 @@ curl -X POST http://localhost:9004/process \
 | `clip_end` | float | no | End of the window, in seconds. Defaults to the end of the video |
 | `shot_detection` | string | no | `"detect"` to split on scene cuts, `"test"` for a fixed 3-shot split. Omit to analyse the whole window as one shot |
 
+**Scenes.** With `programme_id`, the service reads the programme's scenes from MongoDB (collection `MONGO_SCENES_COLLECTION`, default `scenes`; `start_time`/`end_time` in programme seconds), keeps those overlapping `[start_ms, start_ms + duration_ms)`, cuts each one out of the downloaded audio with ffmpeg (`shared/{job_id}/scenes/{scene_id}.wav`) and analyses each separately. With `video_path`, the `clip_start`–`clip_end` window of the file is analysed as a single scene.
+
 **Response (HTTP 200):**
 ```json
 {
   "job_id": "test123",
   "job_type": "gemma",
-  "narrative": [
-    { "start": "00:00:00.000", "end": "00:00:12.400", "caption": "A presenter stands on a clifftop overlooking the sea." }
+  "programme_id": "m002vqlg",
+  "scenes": [
+    {
+      "scene_id": "scene_0.06_27.18",
+      "start_time": 0.06,
+      "end_time": 27.18,
+      "timeline": [
+        {
+          "start": 0.06,
+          "end": 27.18,
+          "transcript": "Here we are, on one of the most rugged coastlines...",
+          "audio_narrative": "The presenter introduces the coastline while gulls call overhead."
+        }
+      ]
+    }
   ],
-  "audio_narrative": [
-    { "start": "00:00:00.000", "end": "00:00:12.400", "caption": "The presenter introduces the coastline while gulls call overhead." }
-  ],
-  "transcript": [
-    { "start": "00:00:00.000", "end": "00:00:12.400", "transcript": "Here we are, on one of the most rugged coastlines..." }
-  ],
-  "audio_detected": true,
-  "video_duration_seconds": 12.4,
   "models": {
     "primary_model": "google/gemma-4-E4B-it",
     "audio_analysis_model": "google/gemma-4-E4B-it",
@@ -93,17 +103,20 @@ curl -X POST http://localhost:9004/process \
 }
 ```
 
-The same payload is written to `shared/{job_id}/output.json`, and each list also gets its own file — `clip_gemma_visual_output.json`, `clip_gemma_audio_output.json`, `clip_gemma_transcript_output.json` — matching what the CLI writes. The `_gemma_` infix keeps them clear of the `visualservice` / `audioservice` outputs the orchestrator puts in the same job directory.
+Timeline times are absolute programme seconds. Segments include a `narrative` caption only when the input has video.
+
+With `storage_type: "mongodb"`, each scene is upserted into `gemma_audio_analysis` as `{_id, programme_id, scene_id, start_time, end_time, timeline}`, keyed on `(programme_id, scene_id)`, so re-running a job replaces the docs instead of duplicating them. Otherwise the payload is written to `shared/{job_id}/output.json`, along with the flattened per-modality files `clip_gemma_visual_output.json`, `clip_gemma_audio_output.json` and `clip_gemma_transcript_output.json` (all scenes concatenated) that `finalize_results` reads. The `_gemma_` infix keeps them clear of the `visualservice` / `audioservice` outputs the orchestrator puts in the same job directory.
 
 **Error responses:**
 
 | Status | Condition |
 |---|---|
-| 404 | The video does not exist under the job directory |
+| 404 | The video does not exist under the job directory, or no scenes exist for `programme_id` in the window |
+| 502 | Audio could not be fetched for `programme_id` |
 | 422 | `video_path` is empty, absolute, not a file, or resolves outside the job directory |
 | 422 | The video cannot be opened or decoded |
 | 500 | The model returned no narrative / audio narrative / transcript, or analysis failed |
-| 503 | The model is not loaded yet (container still warming up) |
+| 503 | The model is not loaded yet (container still warming up), or MongoDB is unreachable |
 
 ### `GET /health`
 
