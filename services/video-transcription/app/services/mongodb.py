@@ -56,7 +56,9 @@ def find_scenes(program_id: str, window_start: float, window_end: float | None) 
     `window_end=None` means the window runs to the end of the programme.
     """
     client = get_mongodb_client()
-    collection = client.get_default_database()[os.environ.get("MONGO_SCENES_COLLECTION", "scenes")]
+    collection_name = os.environ.get("MONGO_SCENES_COLLECTION", "scenes")
+    print(f"using collection {collection_name}")
+    collection = client.get_default_database()[collection_name]
     query: dict = {"programme_id": program_id, "end_time": {"$gt": window_start}}
     if window_end is not None:
         query["start_time"] = {"$lt": window_end}
