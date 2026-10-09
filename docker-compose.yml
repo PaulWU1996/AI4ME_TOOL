@@ -29,7 +29,7 @@ services:
     build:
       context: .
       dockerfile: controller/Dockerfile
-    # image: ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPO}:controller
+    image: ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPO}:controller
     container_name: controller
     ports:
       - "9000:9000"
@@ -55,7 +55,7 @@ services:
     build:
       context: .
       dockerfile: worker/Dockerfile
-    # image: ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPO}:worker
+    image: ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPO}:worker
     container_name: worker
     volumes:
       - ./shared:/app/tmp
@@ -73,21 +73,11 @@ services:
       - ECR_REPO=${ECR_REPO}
       - REDIS_HOST=redis
       - REDIS_PORT=6379
-      - AUDIO_HOST=audioservice
-      - AUDIO_PORT=8000
-      - VISUAL_HOST=visualservice
-      - VISUAL_PORT=8000
       - SHARED_PATH=/app/tmp
       - WORKFLOWS_PATH=/app/workflows
       - ADMIN_KEY=${AI4ME_ADMIN_PASSWORD}
-      # Forwarded (not just baked into ADMIN_KEY above) so the nested `docker compose`
-      # this container shells out to (see worker/utils.py:_compose) can re-interpolate
-      # visualservice's own ADMIN_KEY=${AI4ME_ADMIN_PASSWORD} from its inherited env —
-      # it has no access to the host .env file when starting sibling services.
-      - AI4ME_ADMIN_PASSWORD=${AI4ME_ADMIN_PASSWORD}
       - COMPOSE_PROJECT_DIR=${PWD}
       - COMPOSE_FILE=/app/docker-compose.yml
-      - SERVICE_MODES_PATH=/app/tmp/service_modes.json
     command: celery -A tasks worker --loglevel=info --concurrency=1
     depends_on:
       - redis
@@ -171,12 +161,11 @@ services:
       retries: 3
       start_period: 5m
   
-  # TODO: Rename - llmservice (might require some internal name changes for clarity) 
-  transcriptservice:
+  llmtoolsservice:
     profiles: ["on-demand", "llm", "transcription" ]
     build: services/llm-tools
-    image: ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/ai4me/summarise:summarise
-    container_name: transcriptservice
+    image: ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPO}:llmtoolsservice
+    container_name: llmtoolsservice
     ports:
       - "9003:8000"
     volumes:
@@ -187,7 +176,6 @@ services:
       - SHARED_VOLUME_PATH=/shared
       - UVICORN_WORKERS=1
       - UVICORN_LOG_LEVEL=info
-      - MAX_TRANSCRIPT_CHARS=0
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
       interval: 30s
@@ -197,19 +185,22 @@ services:
     restart: no
     networks:
       - ai_network
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: all
-              capabilities: [ gpu ]
 
-  # TODO: Rename
-  audiotranscriptionservice:
+    # need to be enabled on the aws machine 
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: all
+    #           capabilities: [ gpu ]
+
+  transcriptservice:
     profiles: [ "on-demand", "transcription"]
-    build: services/audio-transcription
-    container_name: audiotranscriptionservice
+    build: services/transcript-tools
+    # may want to add another repo env var - for now all services will be scoped to the orchestrator repo.
+    image: ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPO}:transcriptservice
+    container_name: transcriptservice
     ports:
       - "9005:8000"
     volumes:
@@ -228,13 +219,13 @@ services:
       timeout: 10s
       retries: 3
       start_period: 10s
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: all
-              capabilities: [ gpu ]
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: all
+    #           capabilities: [ gpu ]
 
   gemma:
     build: ./services/video-transcription

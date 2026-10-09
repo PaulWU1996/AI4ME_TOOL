@@ -7,6 +7,7 @@ from pathlib import Path
 import httpx
 
 OLLAMA_BASE_URL = "http://localhost:11434"
+OLLAMA_TIMEOUT_SECS = 60 * 5
 
 logger = logging.getLogger(__name__)
 
@@ -63,9 +64,10 @@ async def generate(transcript: str, language: str = "en", custom_prompt: str | N
     logger.info(f"Generating with prompt:\n {prompt}")
 
     t0 = time.monotonic()
-    async with httpx.AsyncClient(timeout=120.0) as client:
+    async with httpx.AsyncClient(timeout=OLLAMA_TIMEOUT_SECS) as client:
         response = await client.post(f"{OLLAMA_BASE_URL}/api/generate", json=payload)
         response.raise_for_status()
+    
 
     elapsed_ms = int((time.monotonic() - t0) * 1000)
     raw = response.json()["response"]

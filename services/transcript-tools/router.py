@@ -1,4 +1,4 @@
-"""HTTP API over the audio-transcription scripts.
+"""HTTP API over the transcript-tools scripts.
 
 The scripts in this directory are `driver: "python"` nodes today: the worker
 runs one as a subprocess with the predecessor payload on stdin and expects a
@@ -84,9 +84,13 @@ class JobResult(BaseModel):
 
 
 class TranscriptTextResult(JobResult):
-    """`file_path` now points at the transcript.txt written for this job."""
+    """`text_file_path` points at the transcript.txt written for this job.
 
-    file_path: str
+    A separate key from `file_path`, so `merge` leaves the transcript JSON path
+    intact for any later node that still needs it.
+    """
+
+    text_file_path: str
 
 
 class SegmentExtentResult(JobResult):

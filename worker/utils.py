@@ -1,27 +1,15 @@
 import json
 import os
 import subprocess
-import time
 
 import docker
-import docker.errors
-import requests
-import xmltodict
 from consts import (
-    HEALTH_CHECK_INTERVAL,
-    HEALTH_CHECK_TIMEOUT,
-    SERVICE_CONTAINER_NAMES,
-    api_key_path,
     compose_file,
     project_dir,
-    service_modes_path,
     shared_path,
-    visual_api_admin_key,
-    visual_api_url,
 )
 
 _docker_client = None
-
 
 def _client():
     """Lazily-bound Docker client.
@@ -35,28 +23,7 @@ def _client():
         _docker_client = docker.from_env()
     return _docker_client
 
-
-def _container_name(service_name):
-    return SERVICE_CONTAINER_NAMES.get(service_name, service_name)
-
-
-# --- Service Container Management ---
-def load_service_modes():
-    """Reads the mode selection written by scripts/start_services.py.
-
-    Missing file or missing entries default to "coldstart" (today's start/stop-per-job
-    behavior), so keepalive is strictly opt-in via the start script.
-    """
-    try:
-        with open(service_modes_path) as f:
-            return json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError):
-        return {}
-
-
-service_modes = load_service_modes()
-
-
+# keep this for now since we may write a docker driver
 def _compose(service_name, *args):
     cmd = ["docker", "compose", "-f", compose_file]
     if project_dir:
@@ -65,143 +32,12 @@ def _compose(service_name, *args):
     subprocess.run(cmd, check=True)
 
 
-def _service_healthy(service_name):
-    """True when this node's container for the service reports healthy.
-
-    Reuse over restart: whether a service is keepalive-resident or still
-    warm from the previous job in a sequential chain, an already-healthy
-    container is just used as-is.
-    """
-    try:
-        container = _client().containers.get(_container_name(service_name))
-        container.reload()
-        return container.attrs.get("State", {}).get("Health", {}).get("Status") == "healthy"
-    except docker.errors.NotFound:
-        return False
-
-
-def start_service(service_name, max_retries=1):
-    if _service_healthy(service_name):
-        return
-
-    if service_modes.get(service_name) == "keepalive":
-        print(f"[Service Manager] {service_name} is in keepalive mode but not healthy; falling back to cold-start recovery.")
-
-    for attempt in range(max_retries + 1):
-        if attempt == 0:
-            _compose(service_name, "up", "-d")
-        else:
-            _compose(service_name, "restart")
-
-        # health check
-        elapsed = 0
-        while elapsed < HEALTH_CHECK_TIMEOUT:
-            if _service_healthy(service_name):
-                return
-            time.sleep(HEALTH_CHECK_INTERVAL)
-            elapsed += HEALTH_CHECK_INTERVAL
-        else:
-            if attempt < max_retries:
-                print(
-                    f"[{service_name}] Health check failed after {HEALTH_CHECK_TIMEOUT}s. Retrying ({attempt}/{max_retries})..."
-                )
-            else:
-                print(
-                    f"[{service_name}] Health check failed after {HEALTH_CHECK_TIMEOUT}s. No more retries left."
-                )
-
-    _compose(service_name, "stop")
-    raise RuntimeError(f"[Service Manager] {service_name} failed to become healthy!")
-
-
-def stop_service(service_name):
-    if service_modes.get(service_name) == "keepalive":
-        print(f"[Service Manager] Keepalive mode: leaving {service_name} running")
-        return
-    print(f"[Service Manager] Stopping {service_name}")
-    _compose(service_name, "stop")
-
-
 # --- Support functions ---
 def save_to_shared_disk(job_id, filename, data):
     output_dir = os.path.join(shared_path, job_id)
     os.makedirs(output_dir, exist_ok=True)
     with open(os.path.join(output_dir, filename), "w", encoding="utf-8") as f:
         json.dump(data, f, indent=4, ensure_ascii=False)
-
-
-def ensure_api_key(api_dir=api_key_path, admin_key=visual_api_admin_key, force=False):
-    """Return the visual service's API key, generating one if needed.
-
-    force=True skips the cache and mints a fresh key. Without it the cached
-    key is returned forever, so if the service ever forgets or rotates its
-    keys -- its store lives in shared/api-data, which any volume reset wipes
-    -- the worker would keep presenting a dead key and every visual job would
-    fail permanently with no way to recover. process_visual passes force=True
-    after a 401/403 and retries once.
-    """
-    key_file_path = os.path.join(api_dir, "api.key")
-
-    if not force and os.path.exists(key_file_path):
-        with open(key_file_path, "r") as f:
-            existing_key = f.read().strip()
-        if existing_key:
-            print(f"[Key Manager] API key already exists: {existing_key}")
-            return existing_key
-
-    reason = "forced regeneration" if force else "no usable cached key"
-    print(f"[Key Manager] {reason}; requesting a new key at {key_file_path}")
-
-    gen_url = visual_api_url + "/api/keys/generate"
-    headers = {"X-Admin-Key": admin_key, "Content-Type": "application/json"}
-    payload = {"client_name": "client_ai4me", "expire_in_days": 365}
-
-    try:
-        response = requests.post(gen_url, headers=headers, json=payload, timeout=30)
-        response.raise_for_status()
-
-        data = response.json()
-        new_key = data.get("api_key")
-
-        if not new_key:
-            raise ValueError(f"Failed to obtain API key from visual service: {data}")
-
-        os.makedirs(api_dir, exist_ok=True)
-        with open(key_file_path, "w") as f:
-            f.write(new_key)
-        os.chmod(key_file_path, 0o644)
-        print(f"[Key Manager] Generated and saved new API key: {new_key}")
-        return new_key
-
-    except Exception as e:
-        print(f"[Key Manager] Error ensuring API key: {str(e)}")
-        return None
-
-
-def extract_flat_captions(xml_body):
-    """
-    [{"start": 0.0, "end": 15.0, "captions": "..."}, ...]
-    """
-    data = xmltodict.parse(xml_body)
-
-    try:
-        segments_node = data.get("VideoAnalysis", {}).get("Segments", {})
-        raw_segments = segments_node.get("Segment", [])
-    except (AttributeError, KeyError):
-        return []
-
-    if isinstance(raw_segments, dict):
-        raw_segments = [raw_segments]
-
-    return [
-        {
-            "start": float(seg.get("StartTime", 0)),
-            "end": float(seg.get("EndTime", 0)),
-            "captions": seg.get("Description", ""),
-        }
-        for seg in raw_segments
-    ]
-
 
 def load_json_file(file_path) -> dict | None:
     try:

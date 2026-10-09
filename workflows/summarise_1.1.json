@@ -26,7 +26,7 @@
     {
       "id": "transcript",
       "driver": "http",
-      "url": "http://audiotranscriptionservice:8000/process",
+      "url": "http://transcriptservice:8000/process",
       "body": {
         "job_type": "transcript_to_text"
       },
@@ -39,7 +39,7 @@
     {
       "id": "summarise",
       "driver": "http",
-      "url": "http://transcriptservice:8000/process",
+      "url": "http://llmtoolsservice:8000/process",
       "body": {
         "job_type": "summary"
       },
@@ -48,21 +48,6 @@
       "timeout": 1800,
       "depends_on": [
         "transcript"
-      ]
-    },
-    {
-      "id": "tagging",
-      "driver": "http",
-      "url": "http://transcriptservice:8000/process",
-      "body": {
-        "job_type": "tagging"
-      },
-      "merge": true,
-      "save": "tagging_output",
-      "timeout": 1800,
-      "service": "transcriptservice",
-      "depends_on": [
-        "summarise"
       ]
     },
     {

@@ -1,16 +1,20 @@
 import json
+import logging
 import os
-
-from fastapi import Body, FastAPI, HTTPException
-from celery import uuid
-from celery.result import AsyncResult
-from tasks import app as celery_app
-from pydantic import BaseModel
-from typing import Optional
 from datetime import datetime, timezone
 
+from celery import uuid
+from celery.result import AsyncResult
 from dag.compose import build_canvas, build_task_map
 from dag.parser import Parser
+from fastapi import Body, FastAPI, HTTPException
+from pydantic import BaseModel
+from tasks import app as celery_app
+
+# uvicorn only configures its own loggers, so without a root handler the
+# controller's INFO records would be dropped.
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s [%(name)s] %(message)s")
+logger = logging.getLogger("controller")
 
 app = FastAPI()
 
@@ -36,6 +40,18 @@ def save_registry(registry: dict):
     os.makedirs(WORKFLOWS_PATH, exist_ok=True)
     with open(REGISTRY_PATH, "w") as f:
         json.dump(registry, f, indent=2)
+
+
+@app.on_event("startup")
+def log_available_workflows():
+    registry = load_registry()
+    if not registry:
+        logger.info("No workflows registered (%s).", REGISTRY_PATH)
+        return
+    logger.info("Available workflows (%s):", REGISTRY_PATH)
+    for name, entry in sorted(registry.items()):
+        versions = sorted(entry.get("versions", {}))
+        logger.info("  %s: versions=%s, latest=%s", name, versions, entry.get("latest"))
 
 
 class ProcessRequest(BaseModel):
@@ -100,7 +116,7 @@ async def register_workflow():
         json.dump(workflow, f, indent=2)
 
     try:
-        Parser(tmp_path)  # validates acyclic + fully-declared dependencies
+        Parser(tmp_path)
     except Exception as e:
         os.remove(tmp_path)
         raise HTTPException(status_code=400, detail=f"Invalid workflow: {e}")
@@ -159,7 +175,7 @@ async def start_pipeline(request: ProcessRequest):
             )
 
         if diff_seconds > 0:
-            print(f"[Controller] Task set to run at: {eta_dt.isoformat()}")
+            logger.info("Task set to run at: %s", eta_dt.isoformat())
             async_kwargs["eta"] = eta_dt
 
     try:

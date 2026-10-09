@@ -10,27 +10,17 @@ from urllib.parse import parse_qs, urlparse
 import requests
 from celery import Celery
 from consts import (
-    AUDIO_REQUEST_TIMEOUT,
-    VISUAL_REQUEST_TIMEOUT,
-    audio_api_url,
     python_call_timeout,
     python_script_root,
     redis_host,
     redis_port,
     shared_path,
-    visual_api_url,
 )
 from utils import (
-    _compose,
-    ensure_api_key,
-    extract_flat_captions,
     load_json_file,
     save_to_shared_disk,
-    start_service,
-    stop_service,
 )
 
-# --- Celery ---
 app = Celery(
     "tasks",
     broker=f"redis://{redis_host}:{redis_port}/0",
@@ -54,7 +44,37 @@ def report_progress(job_id, stage, message):
     )
 
 
-# --- Download Task ---
+# Extensions for extensionless URLs, keyed by the `?format=` query param,
+# then by the bare filename as a fallback.
+_FORMAT_EXTENSIONS = {"json": "json", "text": "txt"}
+_NAME_EXTENSIONS = {"transcript": "txt", "audio": "wav"}
+
+
+def _resolve_filename(parsed):
+    filename = os.path.basename(parsed.path)
+    if os.path.splitext(filename)[1]:
+        return filename
+    format_param = parse_qs(parsed.query).get("format", [None])[0]
+    ext = _FORMAT_EXTENSIONS.get(format_param) or _NAME_EXTENSIONS.get(filename)
+    return f"{filename}.{ext}" if ext else filename
+
+
+def _fetch(path, parsed, dest):
+    if parsed.scheme == "s3":
+        import boto3
+
+        boto3.client("s3").download_file(parsed.netloc, parsed.path.lstrip("/"), dest)
+    elif parsed.scheme in ("http", "https"):
+        with requests.get(path, stream=True) as r:
+            r.raise_for_status()
+            with open(dest, "wb") as f:
+                f.writelines(r.iter_content(8192))
+    elif os.path.exists(path):
+        shutil.copy2(path, dest)
+    else:
+        raise ValueError(f"Unsupported or missing path: {path}")
+
+
 @app.task(name="tasks.download_file", bind=True, autoretry_for=(Exception,),
           max_retries=3, retry_backoff=1.0, retry_backoff_max=60.0)
 def download_file(self, path, job_id, prompts=None):
@@ -62,52 +82,22 @@ def download_file(self, path, job_id, prompts=None):
     os.makedirs(output_dir, exist_ok=True)
     try:
         parsed = urlparse(path)
-        filename = os.path.basename(parsed.path)
-        if not os.path.splitext(filename)[1]:
-            query_params = parse_qs(parsed.query)
-            format_param = query_params.get("format", [None])[0]
-            if format_param == "json":
-                filename = f"{filename}.json"
-            elif format_param == "text":
-                filename = f"{filename}.txt"
-            else:
-                ext = {"transcript": "txt", "audio": "wav"}.get(filename)
-                if ext:
-                    filename = f"{filename}.{ext}"
+        filename = _resolve_filename(parsed)
         dest = os.path.join(output_dir, filename)
-
-        if parsed.scheme == "s3":
-            import boto3
-
-            s3 = boto3.client("s3")
-            s3.download_file(parsed.netloc, parsed.path.lstrip("/"), dest)
-        elif parsed.scheme in ("http", "https"):
-            with requests.get(path, stream=True) as r:
-                r.raise_for_status()
-                with open(dest, "wb") as f:
-                    f.writelines(r.iter_content(8192))
-        elif os.path.exists(path):
-            shutil.copy2(path, dest)
-        else:
-            raise ValueError(f"Unsupported or missing path: {path}")
-
-        print(f"[Downloader] File ready at {dest}")
-        return {
-            "file_path": dest,
-            # Relative to the shared volume root, as audioservice's own
-            # /process_audio/ expects it -- lets an http-driver node forward
-            # this payload directly with no service-specific field mapping.
-            "video_path": f"{job_id}/{filename}",
-            # Downstream driver: "python" nodes run outside this module and
-            # cannot read the worker's consts, so the workspace root travels
-            # with the payload.
-            "shared_path": shared_path,
-            "job_id": job_id,
-            "prompts": prompts,
-        }
+        _fetch(path, parsed, dest)
     except Exception:
         shutil.rmtree(output_dir, ignore_errors=True)
         raise
+
+    print(f"[Downloader] File ready at {dest}")
+    return {
+        "file_path": dest,
+        "file_name": filename,
+        "video_path": f"{job_id}/{filename}",  # update down stream services to use file path instead
+        "shared_path": shared_path,
+        "job_id": job_id,
+        "prompts": prompts,
+    }
 
 
 @app.task(name="tasks.http_call")
@@ -210,124 +200,7 @@ def python_call(payload, script, params=None, timeout=python_call_timeout, merge
         return {**payload, **result}
     return result
 
-
-@app.task(name="tasks.process_visual")
-def process_visual(payload):
-    file_path = os.path.normpath(payload["file_path"])
-    job_id = payload["job_id"]
-    file_name = os.path.basename(file_path)
-    visual_result = None
-
-    start_service("visualservice")
-    try:
-        api_key = ensure_api_key()
-        if not api_key:
-            raise RuntimeError("Failed to obtain API key for visual service")
-
-        print(f"[Visual Worker] Starting Task: {file_path}")
-
-        if not os.path.exists(file_path):
-            raise FileNotFoundError(f"File not found: {file_path}")
-
-        analyze_url = visual_api_url + "/analyze"
-
-        def post_analyze(key):
-            # TODO: pass prompts to the service
-            with open(file_path, "rb") as f:
-                return requests.post(
-                    analyze_url,
-                    headers={"X-API-Key": key},
-                    files={"video": f},
-                    timeout=VISUAL_REQUEST_TIMEOUT,
-                )
-
-        response = post_analyze(api_key)
-
-        if response.status_code in (401, 403):
-            # The cached key is stale -- the service has forgotten or rotated
-            # it. Without this the worker would present the same dead key on
-            # every future job, and visual analysis would never recover.
-            print(f"[Visual Worker] API key rejected ({response.status_code}); regenerating.")
-            api_key = ensure_api_key(force=True)
-            if not api_key:
-                raise RuntimeError("Failed to regenerate API key for visual service")
-            response = post_analyze(api_key)
-
-        response.raise_for_status()
-        visual_result = extract_flat_captions(response.text)
-
-        file_name_no_ext = os.path.splitext(file_name)[0]
-        save_to_shared_disk(job_id, f"{file_name_no_ext}_visual_output.json", visual_result)
-        print(f"[Visual Worker] Success: {len(visual_result)} segments.")
-    finally:
-        stop_service("visualservice")
-
-    # pass visual chunks forward so process_audio can use them for chunk splitting
-    return {**payload, "visual_result": visual_result}
-
-
-@app.task(name="tasks.process_audio")
-def process_audio(payload):  # change filepath to dict inputs
-    """
-    payload = {
-        file_path:
-        job_id:
-        prompts:
-    }
-    """
-    file_path = os.path.normpath(payload["file_path"])
-    job_id = payload["job_id"]
-    file_name = os.path.basename(file_path)
-
-    start_service("audioservice")
-    try:
-        print(f"[Audio Worker] Starting Task: {file_path}")
-
-        if not os.path.exists(file_path):
-            raise FileNotFoundError(f"Physical file check failed: {file_path}")
-
-        audio_payload = {
-            "video_path": f"{job_id}/{file_name}",
-            "prompts": payload["prompts"],
-            "chunks": payload.get("visual_result"),  # visual segment boundaries for chunk splitting
-        }
-
-        response = requests.post(audio_api_url, json=audio_payload, timeout=AUDIO_REQUEST_TIMEOUT)
-
-        if response.status_code != 200:
-            try:
-                err_detail = response.json().get("detail", response.text)
-            except:
-                err_detail = response.text
-            raise Exception(f"Audio Service Error ({response.status_code}): {err_detail}")
-
-        service_data = response.json()
-
-        outputs = []
-        for entry in service_data.get("output", []):
-            item = {
-                "start": entry["start"].split(",")[0],
-                "end": entry["end"].split(",")[0],
-                "caption": entry["caption"],
-            }
-            outputs.append(item)
-
-        print(f"[Audio Worker] Success: Received {len(outputs)} items.")
-
-        file_name_no_ext = os.path.splitext(file_name)[0]
-        save_to_shared_disk(job_id, f"{file_name_no_ext}_audio_output.json", outputs)
-    finally:
-        stop_service("audioservice")
-
-    return {
-        **payload,
-        "type": "audio",
-        "success": True,
-        "video_name": file_name,
-        "output": outputs,
-        "error": None,
-    }
-
+# remove this and instead each stage manages storage internally or with an optional callback_url
 @app.task(name="tasks.finalize_results")
 def finalize_results(job_id, job_type="full", callback_url=None, expects=None):
     """Merge a job's outputs, write task_info.txt, and report success.
@@ -461,46 +334,3 @@ def finalize_results(job_id, job_type="full", callback_url=None, expects=None):
         )
 
     return final_output
-
-
-
-@app.task(name="tasks.process_gemma")
-def process_gemma(payload):
-    """Run Gemma analysis against the downloaded job video."""
-    file_path = os.path.normpath(payload.get("gemma_file_path") or payload["file_path"])
-    job_id = payload["job_id"]
-    file_name = os.path.basename(payload["file_path"])
-    file_name_no_ext = os.path.splitext(file_name)[0]
-    report_progress(job_id, "gemma", "Running Gemma analysis")
-    container_file_path = file_path.replace("/app/tmp/", "/workspace/AI4ME_TOOL/shared/", 1)
-    container_output_path = os.path.join(
-        "/workspace/AI4ME_TOOL/shared", job_id, file_name_no_ext
-    )
-
-    command = [
-        "python",
-        "analyze_with_gemma.py",
-        container_file_path,
-        "--shot-detection",
-        "detect",
-        "--output",
-        container_output_path,
-    ]
-
-    try:
-        print(f"[Gemma Worker] Starting Task: {file_path}")
-        if not os.path.exists(file_path):
-            raise FileNotFoundError(f"Physical file check failed: {file_path}")
-        _compose("gemma", command)
-        print(f"[Gemma Worker] Success: {file_name}")
-        return {**payload, "gemma_result": {"success": True, "video_name": file_name}}
-    except Exception as e:
-        print(f"[Gemma Worker] Error: {str(e)}")
-        return {
-            **payload,
-            "gemma_result": {
-                "success": False,
-                "video_name": file_name,
-                "error": str(e),
-            },
-        }

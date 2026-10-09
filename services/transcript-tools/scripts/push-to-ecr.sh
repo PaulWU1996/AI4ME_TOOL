@@ -1,3 +1,4 @@
+
 #!/usr/bin/env bash
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -9,7 +10,7 @@ ensure_aws_cli
 ecr_login
 ensure_repository "$ECR_REPO"
 
-DOCKERFILE="$REPO_ROOT/controller/Dockerfile"
-BUILD_CONTEXT="$REPO_ROOT"
+DOCKERFILE="$REPO_ROOT/Dockerfile"
+BUILD_CONTEXT="$REPO_ROOT/"
 
-push_image controller
+push_image transcriptservice
