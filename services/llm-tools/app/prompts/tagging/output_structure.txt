@@ -1,4 +1,0 @@
-Respond ONLY in this exact JSON format with no extra text:
-{
-  "tags": ["array", "of", "tags"]
-}

@@ -26,7 +26,5 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY worker/ .
 COPY dag/ ./dag
 
-# add another other services referenced in your workflows here.
-COPY services/transcript-tools/ ./services/transcript-tools/
 
 CMD ["celery", "-A", "tasks", "worker", "--loglevel=info", "--concurrency=1"]

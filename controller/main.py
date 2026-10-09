@@ -38,7 +38,8 @@ def save_registry(registry: dict):
 
 class ProcessRequest(BaseModel):
     model_config = ConfigDict(extra="allow")
-    job_type: str = "full"
+    payload: dict
+    job_type: str
     version: str | None = None  # pin a specific registered workflow version; defaults to latest
     run_at_ms: int | None = None
 

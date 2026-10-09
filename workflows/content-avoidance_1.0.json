@@ -9,25 +9,21 @@
   },
   "tasks": [
     {
-      "id": "media_selector",
-      "task": "media_selector",
-      "call": "kwargs",
-      "inject": ["job_id","programme_id", "start_ms", "duration_ms", "prompts"],
-      "requires": ["programme_id"],
-      "depends_on": [],
-      "retries": 3
+      "id": "scene-classifcation",
+      "driver": "http",
+      "url": "http://localhost:8080/analyse",
+      "timeout": 300,
+      "merge": true
     },
     {
-      "id": "gemma",
+      "id": "audio-transcription",
       "driver": "http",
-      "url": "http://gemma:8000/process",
+      "url": "http://localhost:9004/process",
       "body": {
-        "job_type": "gemma",
         "storage_type": "mongodb"
       },
       "timeout": 300,
-      "merge": true,
-      "depends_on": ["media_selector"]
+      "merge": true
     }
   ]
 }

@@ -38,8 +38,7 @@ def build_task_map(parser: Parser, job_context: dict) -> dict:
 
     - A node declaring `call: "kwargs"` is dispatched with a slice of the
       job context named in its `inject` list (merged over its static
-      `kwargs`), and is immutable so the chain never injects a predecessor
-      result into it. `requires` fails the build if any such key is absent.
+      `kwargs`. `requires` fails the build if any such key is absent.
     - A node declaring `driver: "http"` becomes the generic `tasks.http_call`
       task, with the call parameters baked in; the predecessor's result
       arrives positionally as the request payload.
@@ -53,11 +52,9 @@ def build_task_map(parser: Parser, job_context: dict) -> dict:
     `download` node declares `retries`), so nothing needs to be attached here.
     """
     signatures = {}
+    job_payload = job_context["payload"]
     for node_id in parser.dag.get_all_nodes():
-        # node attributes are legacy,
-        # 
         attrs = parser.dag.get_node_attributes(node_id)
-
         if attrs.get("driver") == "http":
             signatures[node_id] = signature(
                 "tasks.http_call",
@@ -66,12 +63,9 @@ def build_task_map(parser: Parser, job_context: dict) -> dict:
                     "method": attrs.get("method", "POST"),
                     "headers": attrs.get("headers") or {},
                     "timeout": attrs.get("timeout", 60),
-                    "file_field": attrs.get("file_field"),
-                    "file_path_key": attrs.get("file_path_key", "file_path"),
-                    "service": attrs.get("service"),
                     "body": attrs.get("body"),
                     "merge": attrs.get("merge", False),
-                    "save": attrs.get("save"),
+                    "payload": job_payload
                 },
             )
             continue
@@ -84,6 +78,7 @@ def build_task_map(parser: Parser, job_context: dict) -> dict:
                     "params": attrs.get("params") or {},
                     "timeout": attrs.get("timeout", 300),
                     "merge": attrs.get("merge", False),
+                    "payload": job_payload
                 },
             )
             continue
@@ -102,7 +97,7 @@ def build_task_map(parser: Parser, job_context: dict) -> dict:
             if missing:
                 raise ValueError(f"Node '{node_id}' is missing required inputs {missing}.")
             signatures[node_id] = signature(
-                f"tasks.{task_name}", kwargs=kwargs, immutable=True
+                f"tasks.{task_name}", kwargs=kwargs
             )
         else:
             signatures[node_id] = signature(

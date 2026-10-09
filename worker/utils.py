@@ -1,36 +1,8 @@
 import json
 import os
-import subprocess
-
-import docker
 from consts import (
-    compose_file,
-    project_dir,
     shared_path,
 )
-
-_docker_client = None
-
-def _client():
-    """Lazily-bound Docker client.
-
-    Constructed on first use rather than at import so a worker can boot (and
-    run non-service tasks) on a node without a reachable Docker socket; the
-    connection is only needed when the worker actually manages a container.
-    """
-    global _docker_client
-    if _docker_client is None:
-        _docker_client = docker.from_env()
-    return _docker_client
-
-# keep this for now since we may write a docker driver
-def _compose(service_name, *args):
-    cmd = ["docker", "compose", "-f", compose_file]
-    if project_dir:
-        cmd += ["--project-directory", project_dir]
-    cmd += list(args) + [service_name]
-    subprocess.run(cmd, check=True)
-
 
 # --- Support functions ---
 def save_to_shared_disk(job_id, filename, data):
